@@ -1,168 +1,171 @@
 <p align="center">
-  <img src="./docs/dashdrop_logo_slow.svg" width="256" alt="DashDrop logo">
+  <img src="./docs/dashdrop_logo_slow.svg" width="160" alt="DashDrop Logo">
 </p>
 
 <h1 align="center">DashDrop</h1>
 
 <p align="center">
-  <em>"Fast, local-network file and message transfer just like chatting"</em>
+  <strong>Instant, secure, account-free local transfers between your Android phone and any browser.</strong>
 </p>
 
 <p align="center">
-  Account-free LAN transfer between an Android phone and any modern browser.
+  <a href="https://github.com/LeoAristocrat/DashDrop/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/Release-v1.0.0-blue?style=flat-square" alt="Version 1.0.0"></a>
+  <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Platform-Android_13+-brightgreen?style=flat-square&logo=android" alt="Android 13+"></a>
+  <a href="https://kotlinlang.org"><img src="https://img.shields.io/badge/Kotlin-2.0-purple?style=flat-square&logo=kotlin" alt="Kotlin"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/Cloud-Zero_Dependency-informational?style=flat-square" alt="Zero Cloud">
 </p>
 
 <p align="center">
   <strong>Developed and Maintained by Sayeem Sadik / Leo Aristocrat</strong><br>
-  Website: <a href="https://leoaristocrat.eu.cc/">https://leoaristocrat.eu.cc/</a> · GitHub: <a href="https://github.com/LeoAristocrat/DashDrop">https://github.com/LeoAristocrat/DashDrop</a>
+  🌐 <a href="https://leoaristocrat.eu.cc/">https://leoaristocrat.eu.cc/</a> &nbsp;|&nbsp; 🐙 <a href="https://github.com/LeoAristocrat/DashDrop">GitHub Repository</a>
 </p>
 
 ---
 
-DashDrop turns an Android phone into a short-lived local transfer server. A browser on the same Wi-Fi opens the address shown by the app and can exchange text and files in real time. The browser side needs no app, extension, account, cloud service, or internet connection.
+## 💡 Overview
 
-DashDrop is designed for trusted local networks and keeps the operational complexity on the phone: pairing, session state, history, favorites, backup, and recovery all live in the Android app.
+**DashDrop** turns your Android phone into an ephemeral, high-speed local transfer hub. By launching an embedded lightweight Ktor server, any device on the same local Wi-Fi or hotspot—Mac, Windows, Linux, iOS, or another Android—can instantly connect via its web browser to send files and messages in real time.
 
-Favorites (Ammo Box): You can turn **any message or local file** into a favorite. If it's a file, it will be **stored independently**, so deleting it externally won't affect the favorite. Your favorites are always ready when you need to send them.
+* **Zero accounts or sign-ups.**
+* **Zero internet or cloud requirements.**
+* **Zero client software needed on receiving devices.**
+* **100% private and confined to your local network.**
 
-## Status
+---
 
-| Channel | Revision | State |
-| --- | --- | --- |
-| Stable source | [`v1.0.0`](https://github.com/LeoAristocrat/DashDrop/tree/v1.0.0) | The phone gets a memorable `dashdrop{N}.local` address next to its IP, with a number and port you choose; the browser can favorite session messages to the phone and sees which ones it already keeps; and the server now answers only to its own host names and refuses cross-origin writes. |
-| `main` | [Repository](https://github.com/LeoAristocrat/DashDrop) | Active development branch. |
+## 📸 Screenshots
 
-Per-release changes are documented in the [changelog](./docs/CHANGELOG.md); version history is available from the repository's [tags](https://github.com/LeoAristocrat/DashDrop/tags).
+<table align="center" width="100%">
+  <tr>
+    <td align="center" width="50%">
+      <strong>Clean Home Hub</strong><br>
+      <img src="./docs/screenshot/dashdrop_home.png" alt="DashDrop Home Screen" width="100%">
+      <br><em>One-tap start with modern Material 3 interface</em>
+    </td>
+    <td align="center" width="50%">
+      <strong>Instant Connection & QR Pairing</strong><br>
+      <img src="./docs/screenshot/dashdrop_connection_qr.png" alt="Connection & QR Code" width="100%">
+      <br><em>Direct IP, custom mDNS address, and instant QR pairing</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <strong>Expressive Settings & Themes</strong><br>
+      <img src="./docs/screenshot/dashdrop_settings.png" alt="Settings & Themes" width="100%">
+      <br><em>Catppuccin Mocha, Hacker, AMOLED Black & custom icon shapes</em>
+    </td>
+    <td align="center" width="50%">
+      <strong>Real-Time Web Browser Client</strong><br>
+      <img src="./docs/screenshot/dashdrop_web_client.png" alt="Mobile Web Client" width="46%">
+      <br><em>Responsive browser interface for fast two-way transfers</em>
+    </td>
+  </tr>
+</table>
 
-## Screenshots
+---
 
-![DashDrop overview](./docs/screenshot/dashdrop_screenshot_overview.png)
+## ✨ Key Features
 
-### App
+### 🚀 Seamless Two-Way Transfer
+* **Chat-Style Exchange:** Send messages, links, snippets, documents, APKs, photos, and high-resolution videos seamlessly.
+* **Live Progress & Streaming:** Instant feedback on transfer speeds, completed files, and connection health backed by WebSocket.
+* **Drag-and-Drop Web UI:** Drop files anywhere onto the web client to start immediate transfers.
 
-![Android app](./docs/screenshot/dashdrop_screenshot_phone.png)
+### 🌐 Smart Local Networking
+* **Memorable Local Hostname:** Access your device via `http://dashdrop{N}.local:port` powered by an ultra-lightweight embedded mDNS responder.
+* **Seamless QR Code Pairing:** Connect any mobile phone by scanning the on-screen QR code.
+* **Direct LAN Binding:** Services bind directly to the active Wi-Fi IPv4 address or portable hotspot, bypassing all external internet routing.
 
-### Browser
+### 🎨 Material 3 Expressive UI & Themes
+* **Modern Themes:** Includes **Catppuccin Mocha**, **Hacker** (terminal green), **Anan Blue**, and dynamic Material You palette.
+* **Deep AMOLED Black:** Dedicated battery-saving pure black mode for OLED displays.
+* **Visual Personalization:** Configurable icon shapes (nine-sided cookie, squircle, pebble) and custom avatar presets.
 
-![Browser client](./docs/screenshot/dashdrop_screenshot_browser.png)
+### 📦 Media & System Integrations
+* **In-App Media Preview:** Built-in lightbox for images and media players for video playback.
+* **Send Installed APKs:** Easily extract and transmit installed Android applications (`AppName_Version.apk`) with a single tap.
+* **Phone Storage & Album Access:** Optional, fine-grained read-only browser exploration of the phone's media albums and storage.
+* **Favorites (Ammo Box):** Star important messages and files for instant access across sessions.
 
-### Mobile browser
+### 🔒 Privacy & Security by Design
+* **Single-Use PIN Authentication:** Protected by default against unauthorized local access.
+* **Host Header Verification:** Rejects unauthenticated cross-site requests and DNS rebinding attacks.
+* **Self-Contained Client:** The entire browser client (HTML, CSS, JS, Material Symbols) is bundled inside the APK with strict Content Security Policy (CSP).
 
-![Mobile browser](./docs/screenshot/dashdrop_screenshot_mobile_browser.png)
+---
 
-## Using DashDrop
+## 🚦 Quick Start
 
-1. Install DashDrop on a phone running Android 13 or newer.
-2. Connect the phone and the receiving device to the same Wi-Fi network.
-3. Start the transfer service in DashDrop. The app shows two local URLs — the IP address and a memorable `dashdrop{N}.local` name — and, by default, a one-time six-digit PIN (configurable in Settings).
-4. Open either URL in a computer browser, or scan the QR code with another phone (Android cannot resolve `.local` names natively), and enter the PIN when prompted (if one is required).
-5. Send text or files in either direction. Progress, connection state, and failures update in real time.
-6. Stop the service when finished. The completed session remains available in History according to the configured retention policy.
+1. **Launch:** Open DashDrop on your phone and tap **Start service**.
+2. **Connect:** The app presents two connection addresses:
+   * Direct IP: `http://192.168.x.x:8080`
+   * Local Name: `http://dashdrop{N}.local:8080`
+3. **Open in Browser:** Navigate to either address on your computer or scan the QR code with another mobile device.
+4. **Authenticate:** Enter the six-digit PIN shown on the phone (if enabled).
+5. **Drop & Share:** Transfer files and messages with native speed over your local Wi-Fi.
 
-*Note: The network must allow device-to-device traffic. Guest Wi-Fi and access points with client isolation can block the connection even when both devices show the same network name.*
+> [!NOTE]
+> Ensure both devices are on the same Wi-Fi network. Networks with client isolation (such as public guest Wi-Fi) may restrict peer-to-peer connections.
 
-## Core Features
+---
 
-- **Two-way transfer:** Text and files move between Android and the browser over HTTP and WebSocket, with progress and failure states for both directions. The browser accepts drag-and-drop file uploads. Images and videos show proportional thumbnails in bubbles, with an in-app preview on Android and a fullscreen lightbox in the browser.
-- **Session history:** Room-backed sessions support search, pin, rename, grouping, per-message actions, configurable retention, and crash recovery.
-- **Recall and cleanup:** Messages can be recalled during an active session, optionally including the other end's messages; local history items and sessions can be deleted with confirmation or undo where appropriate. Deleting a file frees its on-disk copy while History keeps an inert record.
-- **Files overview:** Browse files from all sessions in one place with direction/category filters, search, sorting, and multi-select actions (favorite, save, share, jump to message, delete).
-- **Browse the phone's storage:** With the default-off switch on, the phone's own storage is browsable from the session screen's files tab and from the browser's files panel — breadcrumb navigation, in-folder search, sorting, thumbnails and preview for images and video, a batch download in the browser, and a multi-directory selection sent into the session from the phone. DashDrop only ever reads.
-- **Browse the phone's album:** A timeline grouped by capture date or a grid of album folders, on both ends. Long-press and drag to select a range on the phone, pick tiles and batch-download in the browser. Uses Android's narrow media permissions, including Android 14+ "selected photos only", rather than All files access.
-- **Send an installed app:** Search installed apps, and DashDrop extracts the chosen app's base APK and sends it into the session as `AppName_Version.apk`.
-- **Peer permissions in one place:** A panel in the session header states each channel as unavailable, off, or on. Closing a channel also cuts a transfer already in flight.
-- **QR code pairing:** A QR code button on the connection card opens a sheet with the code. It encodes only the URL — the single-use PIN stays on the phone screen.
-- **Memorable LAN address:** Next to the IP, the connection card shows `http://dashdrop{N}.local:port`, which computer browsers open directly. DashDrop answers for that name itself with a minimal mDNS responder that runs only while the service does. Choose the number (0–999) and the port in Settings → Access address; if the port is busy the service moves to the next free one.
-- **Favorites:** Keep independent text or file snapshots in collections, add local items without a session, search them, and send them back into an active transfer.
-- **Portable archives:** Export sessions, favorites, settings, or all data to a ZIP archive (`dashdrop-*.zip`); save it on Android or serve it to a browser, then import it later. Backwards compatibility with legacy backups is fully preserved.
-- **Adaptive appearance:** Material 3 Expressive themes, custom theme colors, dark mode, contrast, motion speed, avatars, bubble shape, and grouping stay aligned across phone and browser.
-- **Multilingual:** Both the app and the browser client support Chinese and English, and the language setting stays in sync across both ends.
-- **Offline browser client:** The HTML, CSS, JavaScript, mdui components, Material Symbols font, and design tokens are bundled directly in the APK; no external CDN is queried.
-
-## Security & Privacy Model
-
-- The server binds only to the concrete private IPv4 address of the active Wi-Fi network, or of the phone's own hotspot, never `0.0.0.0`, never a cellular or VPN interface, and does not depend on a cloud backend.
-- PIN authentication is enabled by default. A PIN is single-use; three wrong attempts lock the source IP for 30 seconds and five wrong attempts stop the service.
-- Browser responses use a strict CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, HttpOnly/SameSite cookies, `textContent` rendering, and short-lived Blob download URLs.
-- **Only the phone's own host names are answered.** Every request's `Host` must be the bound IP and port or the `.local` name shown on the card; anything else gets `403`. State-changing requests and the WebSocket handshake must also be same-origin.
-- The local-name responder is minimal and safe: its receive socket binds `224.0.0.251:5353` and its send socket the bound private IPv4, never `0.0.0.0`.
-- The only network request outside the LAN is the optional update check, which fetches `https://api.github.com/repos/LeoAristocrat/DashDrop/releases/latest` over HTTPS only when triggered manually or explicitly enabled.
-
-## Build from Source
+## 🛠 Building from Source
 
 ### Prerequisites
+* **Android Studio Ladybug** or newer
+* **JDK 17** or **JDK 21**
+* **Android SDK Platform 37** (minSdk 33, targetSdk 36)
 
-- JDK 17 or JDK 21
-- Android SDK Platform 37
-- Android 13+ device or emulator
-
-### Building with Gradle
+### Clone & Build
 
 ```bash
-# Build the debug APK and run JVM tests
-./gradlew assembleDebug testDebugUnitTest
+git clone https://github.com/LeoAristocrat/DashDrop.git
+cd DashDrop
 
-# Install on a connected device
-./gradlew installDebug
+# Run unit tests
+./gradlew testDebugUnitTest
 
-# Run instrumented tests on a connected device/emulator
-./gradlew connectedAndroidTest
+# Build debug APK
+./gradlew assembleDebug
+
+# Build signed production release APK
+./gradlew assembleRelease
 ```
 
-On Windows PowerShell:
-
+On Windows (PowerShell):
 ```powershell
-.\gradlew.bat assembleDebug testDebugUnitTest
+.\gradlew.bat testDebugUnitTest
+.\gradlew.bat assembleDebug
+.\gradlew.bat assembleRelease
 ```
 
-The debug APK is generated at:
-`app/build/outputs/apk/debug/app-debug.apk`
-
-### Running Browser Regression Tests
-
-Browser regression checks run using Node.js without third-party packages:
-
-```bash
-# Run web client test suite
-node scripts/test-web.mjs
-```
-
-## Architecture
+## 🏗 Architecture
 
 ```text
-Android app (com.leoaristocrat.dashdrop)
-├── Jetpack Compose UI (Material 3 Expressive)
-├── TransferService (foreground-service lifecycle)
-│   └── Ktor CIO server ── HTTP / WebSocket ── Browser client (bundled in assets)
-├── Room Database + app-owned file stores (sessions and favorites)
-└── DataStore Preferences (app & peer configuration)
+DashDrop (com.leoaristocrat.dashdrop)
+├── ui/              ── Jetpack Compose UI (Material 3 Expressive, Themes, Sheets)
+├── service/         ── Foreground service lifecycle, Wi-Fi lock, notifications
+├── server/          ── Embedded Ktor CIO HTTP & WebSocket server
+├── session/         ── In-memory active session manager & message pipeline
+├── data/            ── Room database (DashDropDatabase), file storage & DataStore
+├── network/         ── Local IP discovery & embedded mDNS responder
+└── assets/web/      ── Bundled offline browser client (Zero CDN dependencies)
 ```
 
-| Path | Responsibility |
-| --- | --- |
-| `ui/` | Compose screens, ViewModels, shared components, and DashDrop themes |
-| `service/` | Foreground service, transfer controller, and notifications |
-| `server/` | Ktor server, routes, DTOs, authentication, and WebSocket hub |
-| `session/` | In-memory session state and message models |
-| `data/` | Room database (`DashDropDatabase`), repositories, file stores, and settings persistence |
-| `export/` | ZIP schema, importer/exporter, snapshots, and file naming (`dashdrop-*.zip`) |
-| `network/` | Wi-Fi IPv4 discovery, mDNS responder (`dashdrop{N}.local`), and update checker |
-| `util/`, `di/` | Pure helpers and dependency wiring |
-| `app/src/main/assets/web/` | Standalone browser application bundled into the APK |
+---
 
-The project intentionally remains a single Android `:app` module. Android-specific dependencies stay out of the server and pure-logic boundaries so core behavior remains testable on the JVM.
+## 👥 Authors & Maintainers
 
-## Author & Maintainer
+DashDrop is developed and maintained by:
 
-**DashDrop** is developed and maintained by **Sayeem Sadik / Leo Aristocrat**.
-* Website: [https://leoaristocrat.eu.cc/](https://leoaristocrat.eu.cc/)
-* GitHub: [https://github.com/LeoAristocrat/DashDrop](https://github.com/LeoAristocrat/DashDrop)
+* **Sayeem Sadik / Leo Aristocrat**
+  * Website: [https://leoaristocrat.eu.cc/](https://leoaristocrat.eu.cc/)
+  * GitHub: [@LeoAristocrat](https://github.com/LeoAristocrat)
+  * Repository: [https://github.com/LeoAristocrat/DashDrop](https://github.com/LeoAristocrat/DashDrop)
 
-## Acknowledgements
+---
 
-- [Ktor](https://ktor.io/) for the embedded HTTP/WebSocket server
-- [mdui](https://github.com/zdhxiong/mdui) for the offline-bundled Material Design 3 Web Components
+## 📄 License
 
-## License
-
-MIT License. See [LICENSE](./LICENSE).
+This project is licensed under the **MIT License** — see the [LICENSE](./LICENSE) file for details.
