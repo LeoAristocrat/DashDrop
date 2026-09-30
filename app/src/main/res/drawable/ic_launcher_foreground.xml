@@ -1,0 +1,35 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- DashDrop emblem -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,24 C50,29 32,50 32,62 C32,74.15 41.85,84 54,84 C66.15,84 76,74.15 76,62 C76,50 58,29 54,24 Z" />
+    <!-- Upper right arrow (send) -->
+    <path
+        android:strokeColor="#2979FF"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M44,55 L62,55 M56,49 L62,55 L56,61" />
+    <!-- Lower left arrow (receive) -->
+    <path
+        android:strokeColor="#00B0FF"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M64,68 L46,68 M52,62 L46,68 L52,74" />
+    <!-- Speed dashes -->
+    <path
+        android:strokeColor="#2979FF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M40,48 L45,48" />
+    <path
+        android:strokeColor="#00B0FF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M63,75 L68,75" />
+</vector>

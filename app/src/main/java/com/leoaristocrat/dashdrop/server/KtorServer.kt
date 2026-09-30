@@ -1,0 +1,321 @@
+package com.leoaristocrat.dashdrop.server
+
+import com.leoaristocrat.dashdrop.export.ExportMode
+import com.leoaristocrat.dashdrop.export.ExportSnapshot
+import com.leoaristocrat.dashdrop.server.dto.ServerFavoriteOutcome
+import com.leoaristocrat.dashdrop.server.dto.ServerRecallOutcome
+import com.leoaristocrat.dashdrop.server.dto.FavoritesResponseDto
+import com.leoaristocrat.dashdrop.server.dto.PeerInfoDto
+import com.leoaristocrat.dashdrop.server.dto.WebThemeDto
+import com.leoaristocrat.dashdrop.server.routes.FileStore
+import com.leoaristocrat.dashdrop.server.routes.ThumbnailGenerator
+import com.leoaristocrat.dashdrop.server.routes.AuthGate
+import com.leoaristocrat.dashdrop.server.routes.WsHub
+import com.leoaristocrat.dashdrop.server.routes.authRoutes
+import com.leoaristocrat.dashdrop.server.routes.albumRoutes
+import com.leoaristocrat.dashdrop.server.routes.exportRoutes
+import com.leoaristocrat.dashdrop.server.routes.favoriteRoutes
+import com.leoaristocrat.dashdrop.server.routes.fileRoutes
+import com.leoaristocrat.dashdrop.server.routes.StorageBrowser
+import com.leoaristocrat.dashdrop.server.routes.MediaLibrary
+import com.leoaristocrat.dashdrop.server.routes.messageRoutes
+import com.leoaristocrat.dashdrop.server.routes.storageRoutes
+import com.leoaristocrat.dashdrop.server.routes.peerInfoRoutes
+import com.leoaristocrat.dashdrop.server.routes.wsRoutes
+import com.leoaristocrat.dashdrop.session.Message
+import com.leoaristocrat.dashdrop.session.SessionState
+import com.leoaristocrat.dashdrop.session.TransferStats
+import com.leoaristocrat.dashdrop.util.AlbumAccess
+import com.leoaristocrat.dashdrop.util.LocalHostName
+import io.ktor.http.HttpStatusCode
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.ApplicationCallPipeline
+import io.ktor.server.application.call
+import io.ktor.server.application.install
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.EmbeddedServer
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.response.respond
+import io.ktor.server.response.respondRedirect
+import io.ktor.server.routing.Route
+import io.ktor.server.routing.get
+import io.ktor.server.routing.routing
+import io.ktor.server.websocket.WebSockets
+import kotlinx.serialization.json.Json
+import java.io.File
+
+class KtorServer(
+    private val host: String,
+    private val startPort: Int = 8080,
+    private val endPort: Int = 8099,
+    private val pinAuth: PinAuth,
+    private val session: SessionState,
+    private val stats: TransferStats,
+    private val fileStore: FileStore,
+    private val assetLoader: (String) -> ByteArray,
+    private val currentSessionId: () -> Long,
+    private val onPersistMessage: suspend (Message) -> Unit,
+    /**
+     * v1.3 D26：撤回处理器。TransferService 注入桥接 SessionRepository.recallMessage
+     * 并把 data 层 RecallOutcome 转成 [ServerRecallOutcome]。Export 模式注入 stub
+     * 返回 NotFound——export.html 不暴露撤回 UI，此参数永不会被实际调用。
+     */
+    private val onRecallMessage: suspend (messageId: Long, callerSenderId: String) -> ServerRecallOutcome =
+        { _, _ -> ServerRecallOutcome.NotFound },
+    private val recallEnabled: () -> Boolean = { false },
+    private val allowPeerRecall: () -> Boolean = { false },
+    /** D78：浏览器收藏会话消息。Export 模式保持默认（关闭），export.html 没有这个入口。 */
+    private val onFavoriteMessage: suspend (Message) -> ServerFavoriteOutcome = { ServerFavoriteOutcome.Failed },
+    private val peerFavoriteEnabled: () -> Boolean = { false },
+    private val favoritedIds: suspend () -> List<Long> = { emptyList() },
+    /**
+     * client_hello adoption callback. Transfer mode injects the DataStore-backed policy;
+     * export mode keeps the default session-only behavior.
+     */
+    private val onClientHello: suspend (avatarKey: String, explicit: Boolean) -> String? = { key, _ ->
+        session.setPeerAvatarKey(key)
+        null
+    },
+    private val nowMs: () -> Long = System::currentTimeMillis,
+    private val mode: ServiceMode = ServiceMode.Transfer,
+    private val requirePin: Boolean = true,
+    private val onZipSent: suspend () -> Unit = {},
+    /** Export 模式按 depot id 取落盘文件，喂给 ZIP 导出。与下面按收藏行 id 的解析器是两回事。 */
+    private val favoriteDepotFileResolver: (String) -> java.io.File? = { null },
+    /**
+     * v1.19.0 浏览器端收藏 tab。lambda 而非实例：Wi-Fi rebind 会整组替换 KtorServer，
+     * 调用时现取才不会指向已废弃的依赖（见 CLAUDE.md「跨 Wi-Fi rebind 的引用规范」）。
+     */
+    private val favoritesProvider: suspend () -> FavoritesResponseDto = {
+        FavoritesResponseDto(emptyList(), emptyList())
+    },
+    /** 按收藏行 id 取落盘文件 + 展示文件名。与上面按 depot id 的 favoriteDepotFileResolver 是两回事，勿混用。 */
+    private val favoriteRowFileResolver: suspend (Long) -> com.leoaristocrat.dashdrop.server.routes.FavoriteFileHandle? = { null },
+    /** v1.19.0 fix wave：favoriteBetaEnabled 功能开关；默认关闭，收藏接口在关闭时统一回 404。 */
+    private val favoriteEnabled: suspend () -> Boolean = { false },
+    /** Favorite thumbnail path owned by FavoriteFileStore; resolved per request. */
+    private val favoriteThumbFileProvider: ((Long) -> File)? = null,
+    /** Web thumbnail generator. TransferService supplies the Android implementation. */
+    private val thumbnailGenerator: ThumbnailGenerator = ThumbnailGenerator { _, _, _ -> false },
+    /**
+     * M9: provides the phone's current appearance for GET /api/peer-info.
+     * Lambda so the caller can always read the latest settings without
+     * blocking on a Flow — rebind-safe by construction (read at call time).
+     */
+    private val peerInfoProvider: () -> PeerInfoDto = {
+        PeerInfoDto(
+            deviceName = "DashDrop",
+            phoneAvatarId = 0,
+            backgroundMode = "DEFAULT",
+            recallEnabled = true,
+            allowPeerRecall = true,
+        )
+    },
+    private val webLanguageTagProvider: () -> String = { "zh-CN" },
+    /**
+     * v1.20.0 存储浏览。三者都是 lambda：`storageBrowserProvider` 因为跨 rebind 存活的东西
+     * 不能直接持有实例（CLAUDE.md 的 rebind 引用规范）；另两个因为要现取当前设置与权限态。
+     * `hasStoragePermission` 由 service 层提供，**server 包里不出现 `Environment`**。
+     */
+    private val storageBrowserProvider: () -> StorageBrowser? = { null },
+    private val storageBrowsingEnabled: suspend () -> Boolean = { false },
+    private val hasStoragePermission: () -> Boolean = { false },
+    /** SessionFileStore-owned path for derived storage thumbnails. */
+    private val storageThumbFileProvider: ((String) -> File)? = null,
+    private val storageThumbnailCacheMaxBytes: () -> Long = { 100L * 1024L * 1024L },
+    private val albumBrowsingEnabled: suspend () -> Boolean = { false },
+    private val albumAccessProvider: () -> AlbumAccess = { AlbumAccess.None },
+    private val mediaLibraryProvider: () -> MediaLibrary? = { null },
+    private val albumThumbFileProvider: ((String) -> File)? = null,
+) {
+    private var engine: EmbeddedServer<*, *>? = null
+    var boundPort: Int = -1
+        private set
+
+    internal val wsHub = WsHub()
+    private val authGate = AuthGate(required = requirePin, pinAuth = pinAuth)
+
+    fun start(): Int {
+        var lastError: Throwable? = null
+        for (port in startPort..endPort) {
+            // 浏览器拒绝打开的端口：绑上了电脑也打不开，直接跳过。
+            if (port in LocalHostName.BROWSER_BLOCKED_PORTS) continue
+            // 保留预探测的真实异常：rebind 时 IP 还没就绪（EADDRNOTAVAIL）不该被记成「端口被占用」。
+            probePort(port)?.let {
+                lastError = it
+                continue
+            }
+            var candidate: EmbeddedServer<*, *>? = null
+            try {
+                val server = embeddedServer(CIO, host = host, port = port) {
+                    install(ContentNegotiation) {
+                        json(Json { ignoreUnknownKeys = true; encodeDefaults = true })
+                    }
+                    install(WebSockets) {
+                        pingPeriodMillis = 15_000L
+                        timeoutMillis = 30_000L
+                    }
+                    install(StatusPages) {
+                        exception<Throwable> { call, cause ->
+                            call.respond(HttpStatusCode.InternalServerError, mapOf("error" to (cause.message ?: "error")))
+                        }
+                    }
+                    // D79：只认本机对外的名字（挡 DNS 重绑定）；跨源的状态修改请求在进路由前就被挡掉。
+                    installSameOriginGuard(allowedHosts = { servedHosts(host, port, session.snapshot.value.localName) })
+                    intercept(ApplicationCallPipeline.Plugins) {
+                        call.response.headers.append("Content-Security-Policy",
+                            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+                        call.response.headers.append("X-Content-Type-Options", "nosniff")
+                        // same-origin 而非 no-referrer（D79）：no-referrer 下同源表单/部分 fetch 会发 `Origin: null`，
+                        // 同源校验就把自己挡了。same-origin 对外链同样什么都不发，不泄露局域网地址。
+                        call.response.headers.append("Referrer-Policy", "same-origin")
+                        call.response.headers.append("X-Frame-Options", "DENY")
+                        call.response.headers.append("Cross-Origin-Opener-Policy", "same-origin")
+                        call.response.headers.append("Cross-Origin-Resource-Policy", "same-origin")
+                    }
+                    routing {
+                        authRoutes(
+                            authGate = authGate,
+                            readAsset = assetLoader,
+                            redirectAfterLogin = {
+                                when (mode) {
+                                    ServiceMode.Transfer -> "/app"
+                                    ServiceMode.Export -> "/export"
+                                }
+                            },
+                            publicThemeProvider = {
+                                val info = peerInfoProvider()
+                                WebThemeDto(
+                                    themeSeed = info.themeSeed,
+                                    themeDark = info.themeDark,
+                                    amoled = info.amoled,
+                                    languageTag = webLanguageTagProvider(),
+                                )
+                            },
+                        )
+                        when (mode) {
+                            ServiceMode.Transfer -> installTransferRoutes(authGate)
+                            ServiceMode.Export -> installExportRoutes(authGate)
+                        }
+                    }
+                }
+                candidate = server
+                server.start(wait = false)
+                engine = server
+                boundPort = port
+                return port
+            } catch (t: Throwable) {
+                runCatching { candidate?.stop(0, 0) }
+                lastError = t
+            }
+        }
+        throw IllegalStateException("No port available in $startPort..$endPort", lastError)
+    }
+
+    private fun Route.installTransferRoutes(authGate: AuthGate) {
+        // /app 的镜像方向：浏览器停在导出页、手机端改回传输模式后刷新，原先会拿到
+        // 一个裸 404（exportRoutes 只在 Export 模式注册）。这条只能装在传输模式这侧 ——
+        // 装进 authRoutes 会在导出模式下遮掉真正的 /export（authRoutes 先注册）。
+        // 不变量：每个页面路由都必须把「当前模式不该停在这一页」的请求送回正确的落地页。
+        get("/export") { call.respondRedirect("/app") }
+        messageRoutes(
+            session = session,
+            authGate = authGate,
+            onPersist = onPersistMessage,
+            broadcastEvent = { type, payload -> wsHub.broadcast(type, payload) },
+            nowMs = nowMs,
+            recallHandler = onRecallMessage,
+            recallEnabled = recallEnabled,
+            allowPeerRecall = allowPeerRecall,
+            favoriteHandler = onFavoriteMessage,
+            peerFavoriteEnabled = peerFavoriteEnabled,
+            favoritedIds = favoritedIds,
+        )
+        fileRoutes(
+            session = session,
+            authGate = authGate,
+            store = fileStore,
+            stats = stats,
+            currentSessionId = currentSessionId,
+            onPersist = onPersistMessage,
+            broadcastEvent = { type, payload -> wsHub.broadcast(type, payload) },
+            nowMs = nowMs,
+            thumbnailer = thumbnailGenerator,
+        )
+        peerInfoRoutes(authGate, peerInfoProvider)
+        favoriteRoutes(
+            authGate = authGate,
+            listProvider = favoritesProvider,
+            fileResolver = favoriteRowFileResolver,
+            enabled = favoriteEnabled,
+            favoriteThumbFile = favoriteThumbFileProvider,
+            thumbnailer = thumbnailGenerator,
+        )
+        // 挂在传输模式这侧而非 authRoutes：后者两种模式都注册，会让导出模式也暴露存储接口。
+        storageRoutes(
+            authGate = authGate,
+            enabled = storageBrowsingEnabled,
+            hasPermission = hasStoragePermission,
+            browser = storageBrowserProvider,
+            storageThumbFile = storageThumbFileProvider,
+            thumbnailer = thumbnailGenerator,
+            thumbnailCacheMaxBytes = storageThumbnailCacheMaxBytes,
+        )
+        albumRoutes(
+            authGate = authGate,
+            enabled = albumBrowsingEnabled,
+            access = albumAccessProvider,
+            library = mediaLibraryProvider,
+            albumThumbFile = albumThumbFileProvider,
+            thumbnailCacheMaxBytes = storageThumbnailCacheMaxBytes,
+        )
+        wsRoutes(authGate, session, wsHub, onClientHello)
+    }
+
+    private fun Route.installExportRoutes(authGate: AuthGate) {
+        exportRoutes(
+            sessionState = session,
+            authGate = authGate,
+            readAsset = assetLoader,
+            exportedBy = { _ ->
+                (session.exportMode.value as? ExportMode.Armed)?.snapshot
+                    ?: ExportSnapshot(exportedAt = nowMs(), sessions = emptyList())
+            },
+            fileResolver = { sessionId, fileId ->
+                fileStore.fileDir(sessionId).resolve(fileId).takeIf { it.exists() }
+            },
+            onZipSent = onZipSent,
+            now = nowMs,
+            favoriteFileResolver = favoriteDepotFileResolver,
+        )
+        peerInfoRoutes(authGate, peerInfoProvider)
+        // v1.3 test2 修订：export 页也挂 WS，让浏览器通过 WS onclose 立即
+        // 感知断网（不再依赖 fetch 探测的 3 秒延迟）。WS 复用同一 cookie 鉴权。
+        wsRoutes(authGate, session, wsHub, onClientHello)
+    }
+
+    /**
+     * 先用裸 channel 探一下端口，被占用的端口根本不交给 Ktor。
+     *
+     * Ktor CIO 绑定失败时，除了 start() 同步抛出，还会在后台协程里把 BindException
+     * **再抛一次且无人接住**；在 Android 上未捕获异常会杀掉整个进程（2026-09-26 API 36 实测）。
+     * 用 ServerSocketChannel 的平台默认选项，与 Ktor 绑定时一致：Linux 上 TIME_WAIT
+     * 的端口两边都认为可绑，不会因为探测更严而把刚停的端口误判成「被占用」。
+     * 守卫：KtorServerRestartPortTest / KtorServerRestartPortInstrumentedTest。
+     *
+     * 返回 null = 可绑；否则是绑定失败的原因。
+     */
+    private fun probePort(port: Int): Throwable? = runCatching {
+        java.nio.channels.ServerSocketChannel.open().use {
+            it.bind(java.net.InetSocketAddress(host, port))
+        }
+    }.exceptionOrNull()
+
+    fun stop() {
+        engine?.stop(1_000, 3_000)
+        engine = null
+        boundPort = -1
+    }
+}

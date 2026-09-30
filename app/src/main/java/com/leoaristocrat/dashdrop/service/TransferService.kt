@@ -1,0 +1,967 @@
+package com.leoaristocrat.dashdrop.service
+
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.res.Configuration
+import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
+import android.provider.Settings
+import android.util.Log
+import com.leoaristocrat.dashdrop.BuildConfig
+import com.leoaristocrat.dashdrop.R
+import com.leoaristocrat.dashdrop.data.AndroidThumbnailGenerator
+import com.leoaristocrat.dashdrop.data.PeerFavoriteResult
+import com.leoaristocrat.dashdrop.data.SessionRepository
+import com.leoaristocrat.dashdrop.data.settings.BackgroundSetting
+import com.leoaristocrat.dashdrop.data.settings.AppLanguageManager
+import com.leoaristocrat.dashdrop.data.settings.DarkMode
+import com.leoaristocrat.dashdrop.data.settings.DashDropSettings
+import com.leoaristocrat.dashdrop.data.settings.ThemeMode
+import com.leoaristocrat.dashdrop.di.ServiceLocator
+import com.leoaristocrat.dashdrop.export.ExportMode
+import com.leoaristocrat.dashdrop.export.ExportSnapshot
+import com.leoaristocrat.dashdrop.network.LinkInfo
+import com.leoaristocrat.dashdrop.network.MdnsResponder
+import com.leoaristocrat.dashdrop.network.NetworkRebinder
+import com.leoaristocrat.dashdrop.network.UsableIpPolicy
+import com.leoaristocrat.dashdrop.network.RebindIntent
+import com.leoaristocrat.dashdrop.server.KtorServer
+import com.leoaristocrat.dashdrop.server.PinAuth
+import com.leoaristocrat.dashdrop.server.ServiceMode
+import com.leoaristocrat.dashdrop.server.dto.PeerAvatarChangedDto
+import com.leoaristocrat.dashdrop.server.dto.PeerInfoDto
+import com.leoaristocrat.dashdrop.server.dto.LeadingVisualDto
+import com.leoaristocrat.dashdrop.server.dto.ServerFavoriteOutcome
+import com.leoaristocrat.dashdrop.server.dto.ServerRecallOutcome
+import com.leoaristocrat.dashdrop.server.dto.FavoritesStateDto
+import com.leoaristocrat.dashdrop.server.dto.StatusDto
+import com.leoaristocrat.dashdrop.server.dto.WireJson
+import com.leoaristocrat.dashdrop.session.LocalNameStatus
+import com.leoaristocrat.dashdrop.session.Message
+import com.leoaristocrat.dashdrop.session.NetworkStatus
+import com.leoaristocrat.dashdrop.session.PeerChannelState
+import com.leoaristocrat.dashdrop.session.peerChannelState
+import com.leoaristocrat.dashdrop.session.peerFavoritedIds
+import com.leoaristocrat.dashdrop.ui.theme.resolveDashDropTheme
+import com.leoaristocrat.dashdrop.ui.theme.resolveLeadingColors
+import com.leoaristocrat.dashdrop.ui.theme.toWireColors
+import com.leoaristocrat.dashdrop.util.BrowserAvatarHelloDecision
+import com.leoaristocrat.dashdrop.util.BrowserAvatarHelloPolicy
+import com.leoaristocrat.dashdrop.util.IdGen
+import com.leoaristocrat.dashdrop.util.LocalHostName
+import com.leoaristocrat.dashdrop.util.AlbumAccess
+import com.leoaristocrat.dashdrop.data.currentAlbumAccess
+import com.leoaristocrat.dashdrop.data.hasAllFilesAccess
+import com.leoaristocrat.dashdrop.util.formatThemeSeed
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class TransferService : Service() {
+
+    data class Running(
+        val ip: String,
+        val port: Int,
+        val pin: String,
+        val sessionId: Long,
+        val requirePin: Boolean,
+    )
+
+    inner class Binding : Binder() {
+        val running: StateFlow<Running?> get() = _running
+        val controller: TransferController? get() = this@TransferService.controller
+    }
+
+    private val binding = Binding()
+    private val _running = MutableStateFlow<Running?>(null)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile private var ktor: KtorServer? = null
+    private var pinAuth: PinAuth? = null
+    private var controller: TransferController? = null
+    private var currentSessionId: Long = -1L
+    @Volatile private var currentMode: ServiceMode? = null
+    private var currentRequirePin: Boolean = true
+    private var statusBroadcastJob: Job? = null
+    private var peerFavoritesJob: Job? = null
+
+    private val rebinder = NetworkRebinder()
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var networkWatchJob: Job? = null
+    private var currentHostIp: String? = null
+
+    /**
+     * 跨 rebind 存活，但**不持有任何 KtorServer 成员**（rebind 引用规范）：IP 只经参数传入。
+     * 守卫：service/MdnsResponderRebindReferenceTest。
+     */
+    private val mdns by lazy {
+        MdnsResponder(this) { status -> ServiceLocator.session.updateLocalName(status) }
+    }
+
+    private fun startLocalName(ip: String) {
+        if (!latestSettings.localNameEnabled) {
+            ServiceLocator.session.updateLocalName(LocalNameStatus.Disabled)
+            return
+        }
+        val number = runBlocking { ServiceLocator.settingsRepository.ensureHostNumber() }
+        mdns.start(ip, number)
+    }
+
+    /** 当前系统是否处于深色模式（用于 DarkMode.SYSTEM 解析后推给浏览器端做双端深浅对齐）。 */
+    private fun isSystemDark(): Boolean =
+        (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+
+    /**
+     * M9: latest settings snapshot for peerInfoProvider. Updated by a coroutine
+     * that collects SettingsRepository.settings — no runBlocking, no blocking read.
+     * @Volatile so the lambda in buildTransferKtor always sees the freshest value
+     * across threads (IO dispatcher writes, Binder thread reads).
+     */
+    @Volatile private var latestSettings: DashDropSettings = DashDropSettings()
+    private var settingsCollectorJob: Job? = null
+
+    private fun currentPeerInfo(settings: DashDropSettings): PeerInfoDto {
+        val systemDark = isSystemDark()
+        val resolvedTheme = resolveDashDropTheme(settings, this, systemDark)
+        val leadingColors = resolveLeadingColors(
+            settings.leadingColorMode,
+            resolvedTheme.colorScheme,
+            resolvedTheme.dark,
+        ).toWireColors()
+        return with(Companion) {
+            settings.toPeerInfoDto(
+                systemDark = systemDark,
+                defaultDeviceName = getString(R.string.settings_default_device_name),
+                leadingColors = leadingColors,
+                storageAvailable = hasAllFilesAccess(),
+                albumAvailable = currentAlbumAccess() != AlbumAccess.None,
+            ).copy(languageTag = AppLanguageManager.effectiveLanguageTag(this@TransferService))
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // LocaleManager and system dark mode do not emit a DataStore update.
+        scope.launch { broadcastCurrentSettings() }
+    }
+
+    private suspend fun broadcastCurrentSettings() {
+        if (currentMode != ServiceMode.Transfer) return
+        val payload = WireJson.encodeToString(PeerInfoDto.serializer(), currentPeerInfo(latestSettings))
+        // Resolve the current hub at send time: this job can outlive a Wi-Fi rebind.
+        ktor?.wsHub?.broadcast("settings_changed", payload)
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binding
+
+    @Synchronized
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action ?: return START_NOT_STICKY
+        // 兜底：Context.startForegroundService 调出后系统硬性要求 5 秒内调 startForeground，
+        // 否则抛 ForegroundServiceDidNotStartInTimeException。所有 onStartCommand 分支的
+        // early return 都必须先占住前台槽位。这里无脑先 startForeground 一个临时通知；
+        // 业务分支若决定继续运行，会用真正的通知 replace；若 stopSelf，临时通知随 stopForeground 一并清掉。
+        NotificationHelper.ensureChannel(this)
+        if (currentMode == null) {
+            val placeholder = NotificationHelper.build(
+                context = this,
+                title = getString(R.string.app_name),
+                text = getString(R.string.service_starting),
+            )
+            startForeground(
+                NotificationHelper.NOTIFICATION_ID,
+                placeholder,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        }
+        when (action) {
+            ACTION_START -> handleStart()
+            ACTION_STOP -> handleStop()
+            ACTION_EXPORT -> handleExport()
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun handleStart() {
+        if (currentMode == ServiceMode.Export) {
+            Log.w(TAG, "ACTION_START refused: export in progress")
+            // No-op: keep the running export foreground notification.
+            return
+        }
+        // A temporarily unavailable listener still belongs to the current session.
+        if (currentMode == ServiceMode.Transfer || ktor != null) return
+        startTransfer()
+    }
+
+    private fun startTransfer() {
+        val ip = ServiceLocator.networkInfo.currentWifiIpv4()
+            ?.takeIf { UsableIpPolicy.isUsable(it) }
+            ?: run {
+                Log.e(TAG, "startTransfer aborted: no usable Wi-Fi IPv4")
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return
+            }
+
+        val now = System.currentTimeMillis()
+        val name = getString(R.string.service_default_session_name, FMT.format(Date(now)))
+        val startSettings = runBlocking { ServiceLocator.settingsRepository.settings.first() }
+        latestSettings = startSettings
+        ServiceLocator.latestShowHiddenFiles = startSettings.showHiddenFiles
+        currentRequirePin = startSettings.requirePin
+        val sid = runBlocking {
+            runCatching {
+                val groupId = startSettings.activeGroupId
+                val id = ServiceLocator.repository.beginSession(name, startedAt = now, groupId = groupId)
+                ServiceLocator.repository.fifoSweep()
+                id
+            }.getOrNull()
+        }
+        if (sid == null) {
+            Log.e(TAG, "startTransfer aborted: beginSession failed")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+        currentSessionId = sid
+        ServiceLocator.session.startNew(sid)
+
+        // Browser avatar single source of truth: seed the in-memory session value from
+        // DataStore at every transfer start (session.reset() clears it back to default).
+        scope.launch {
+            ServiceLocator.settingsRepository.browserAvatarKeyOrNull()?.let {
+                ServiceLocator.session.setPeerAvatarKey(it)
+            }
+        }
+
+        // M9: start settings collector once — survives rebinds since it's tied to
+        // the service scope, not a KtorServer instance.
+        if (settingsCollectorJob == null) {
+            settingsCollectorJob = scope.launch {
+                ServiceLocator.settingsRepository.settings.collect {
+                    latestSettings = it
+                    // server 侧的 SharedStorageBrowser 在非 suspend 路径上列举，
+                    // 拿不到 DataStore 的 Flow —— 这里是它唯一的同步入口。
+                    ServiceLocator.latestShowHiddenFiles = it.showHiddenFiles
+                    // DataStore -> session + browser propagation (single point). Skips when the
+                    // session already holds the value - adoption/Serving paths write the session
+                    // first, so this also suppresses echo broadcasts back to the browser.
+                    val browserAvatar = it.browserAvatarKey
+                    if (browserAvatar != ServiceLocator.session.peerAvatarKey.value) {
+                        ServiceLocator.session.setPeerAvatarKey(browserAvatar)
+                        if (currentMode == ServiceMode.Transfer) {
+                            ktor?.wsHub?.broadcast(
+                                "peer_avatar_changed",
+                                WireJson.encodeToString(
+                                    PeerAvatarChangedDto.serializer(),
+                                    PeerAvatarChangedDto(browserAvatar),
+                                ),
+                            )
+                        }
+                    }
+                    broadcastCurrentSettings()
+                }
+            }
+        }
+
+        val auth = PinAuth(
+            nowMs = System::currentTimeMillis,
+            pinSupplier = { IdGen.newPin() },
+            tokenSupplier = { IdGen.newToken() },
+        )
+        pinAuth = auth
+
+        currentMode = ServiceMode.Transfer
+        // 新会话从用户设定的端口起扫（spec §4.6）；只有 rebind 沿用已绑端口。
+        val server = buildTransferKtor(ip, auth, startPort = latestSettings.customPort)
+        val port = runCatching { server.start() }.getOrElse {
+            Log.e(TAG, "startTransfer failed to bind", it)
+            stopActiveServer()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+        ktor = server
+        currentHostIp = ip
+        rebinder.prime(ip)
+        ServiceLocator.session.updateBoundPort(port)
+        ServiceLocator.session.updateRequestedPort(latestSettings.customPort)
+        startLocalName(ip)
+        registerNetworkCallbackIfNeeded()
+
+        controller = TransferController(
+            session = ServiceLocator.session,
+            stats = ServiceLocator.stats,
+            fileStore = ServiceLocator.fileStore,
+            repository = ServiceLocator.repository,
+            wsHub = { ktor?.wsHub },
+            nowMs = System::currentTimeMillis,
+            senderId = phoneSenderId(),
+            scope = scope,
+            recallEnabled = { latestSettings.recallBetaEnabled },
+            allowPeerRecall = { latestSettings.allowPeerRecall },
+        )
+        // v1.3：HistoryViewModel 撤回入口通过 ServiceLocator 拿 controller。
+        // 见 ServiceLocator.currentController 的 KDoc。
+        ServiceLocator.currentController = controller
+
+        val pin = auth.currentPin() ?: "------"
+        _running.value = Running(ip, port, pin, sid, currentRequirePin)
+
+        statusBroadcastJob = scope.launch {
+            while (isActive) {
+                val snap = ServiceLocator.session.snapshot.value
+                val uptime = (System.currentTimeMillis() - snap.serviceStartedAt) / 1000
+                val status = StatusDto(
+                    startedAt = snap.serviceStartedAt,
+                    uptime = uptime,
+                    fileCount = ServiceLocator.stats.fileCount(),
+                    totalBytes = ServiceLocator.stats.totalBytes(),
+                    bytesPerSecond = ServiceLocator.stats.bytesPerSecond(),
+                    clientConnected = snap.clientConnected,
+                )
+                val payload = WireJson.encodeToString(StatusDto.serializer(), status)
+                // 必须用 field-level [ktor] 取当前 wsHub —— 闭包捕获 startTransfer
+                // 局部 server.wsHub 会让 rebind 后 status 持续推到旧 hub，新 hub
+                // 永远收不到帧，浏览器心跳 4 秒超时 → close → reconnect 死循环。
+                ktor?.wsHub?.broadcast("status", payload)
+                delay(1000)
+            }
+        }
+        // D78：手机上的收藏变化（在会话里、收藏页里、浏览器发起的都算，含取消）推给浏览器，
+        // 星标随之变实心/空心。同样必须 field-level [ktor] 现取 hub，理由同上。
+        peerFavoritesJob = scope.launch {
+            peerFavoritedIds(
+                gate = ServiceLocator.settingsRepository.settings
+                    .map { it.favoriteBetaEnabled && it.allowPeerFavorite },
+                ids = ServiceLocator.favoritesRepository.observeFavoritedIds(currentSessionId),
+            ).collect { ids ->
+                val payload = WireJson.encodeToString(FavoritesStateDto.serializer(), FavoritesStateDto(ids))
+                ktor?.wsHub?.broadcast("favorites_state", payload)
+            }
+        }
+
+        val notif = NotificationHelper.build(
+            context = this,
+            title = getString(R.string.service_transfer_title),
+            text = transferNotificationText(ip, port),
+        )
+        startForeground(
+            NotificationHelper.NOTIFICATION_ID,
+            notif,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+    }
+
+    private fun handleExport() {
+        if (currentMode == ServiceMode.Transfer) {
+            Log.w(TAG, "ACTION_EXPORT refused: transfer in progress")
+            // Don't stopSelf — transfer is alive and owns the foreground.
+            return
+        }
+        if (currentMode == ServiceMode.Export || ktor != null) {
+            Log.w(TAG, "ACTION_EXPORT ignored: export already running")
+            return
+        }
+
+        // Caller (HomeViewModel) must have already armed the export snapshot.
+        val armed = ServiceLocator.session.exportMode.value as? ExportMode.Armed
+        if (armed == null) {
+            Log.e(TAG, "ACTION_EXPORT without Armed state (was ${ServiceLocator.session.exportMode.value})")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+        latestSettings = runBlocking { ServiceLocator.settingsRepository.settings.first() }
+        ServiceLocator.latestShowHiddenFiles = latestSettings.showHiddenFiles
+        currentRequirePin = armed.session.requirePin
+
+        val ip = ServiceLocator.networkInfo.currentWifiIpv4()
+            ?.takeIf(UsableIpPolicy::isUsable)
+            ?: run {
+                Log.e(TAG, "ACTION_EXPORT aborted: no Wi-Fi IPv4")
+                ServiceLocator.session.clearExport()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return
+            }
+
+        // Align with ACTION_START: fresh PinAuth whose initial PIN comes from
+        // IdGen (same 6-digit generator). The HomeViewModel's armExport call will
+        // have recorded the same PIN onto the snapshot; here we mint a Ktor-side
+        // auth instance seeded with that PIN so /auth/pin accepts it.
+        val auth = PinAuth(
+            nowMs = System::currentTimeMillis,
+            pinSupplier = { armed.session.pin },
+            tokenSupplier = { IdGen.newToken() },
+        )
+        pinAuth = auth
+
+        currentMode = ServiceMode.Export
+        // 导出不走 session.startNew()，snapshot 里可能还留着上次的 boundPort —— 别拿它起扫。
+        val server = buildExportKtor(ip, auth, startPort = latestSettings.customPort)
+        val port = runCatching { server.start() }.getOrElse {
+            Log.e(TAG, "export failed to bind", it)
+            stopActiveServer()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+        ktor = server
+        currentHostIp = ip
+        rebinder.prime(ip)
+        ServiceLocator.session.updateBoundPort(port)
+        ServiceLocator.session.updateRequestedPort(latestSettings.customPort)
+        startLocalName(ip)
+        registerNetworkCallbackIfNeeded()
+        // _running is the transfer-mode signal consumed by ServingViewModel.
+        // Export mode has its own UI (ExportingScreen) that reads SessionState.exportMode
+        // directly, so we intentionally leave _running null here.
+
+        val notif = NotificationHelper.build(
+            context = this,
+            title = getString(R.string.service_export_title),
+            text = exportNotificationBody(armed.snapshot),
+        )
+        startForeground(
+            EXPORT_NOTIFICATION_ID,
+            notif,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+    }
+
+    private suspend fun handleZipSent() {
+        // ExportRoutes already called markExportDone before invoking this callback.
+        // Give the OS a moment to flush the response body before tearing down the
+        // engine — tests cover that flushing the 1 s grace in KtorServer.stop() is
+        // enough, but 500 ms of extra slack here avoids racing the finalizer.
+        delay(500)
+        stopSelf()
+    }
+
+    private fun handleStop() {
+        stopActiveServer()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    @Synchronized
+    private fun stopActiveServer() {
+        mdns.stop()
+        unregisterNetworkCallback()
+        val mode = currentMode
+        // Before tearing down Ktor, tell live WS clients this is a deliberate
+        // stop so they DON'T enter the reconnect loop — user's next service
+        // launch is a fresh session with a new PIN/URL.
+        // The rebind path goes around stopActiveServer entirely (it calls
+        // ktor.stop() inline), so transient restarts still look like a
+        // network blip to the browser and trigger normal reconnect.
+        ktor?.wsHub?.let { hub ->
+            runCatching {
+                runBlocking { hub.broadcastStopAndClose() }
+            }
+        }
+        ktor?.stop(); ktor = null
+        controller = null
+        ServiceLocator.currentController = null
+        statusBroadcastJob?.cancel(); statusBroadcastJob = null
+        peerFavoritesJob?.cancel(); peerFavoritesJob = null
+
+        if (mode == ServiceMode.Transfer) {
+            val sid = currentSessionId
+            if (sid > 0) {
+                Log.d(TAG, "stopActiveServer: ending session $sid")
+                runCatching {
+                    runBlocking {
+                        ServiceLocator.repository.endSession(
+                            sid,
+                            endedAt = System.currentTimeMillis(),
+                            peerAvatarId = ServiceLocator.session.peerAvatarId.value,
+                            peerAvatarKey = ServiceLocator.session.peerAvatarKey.value,
+                        )
+                        ServiceLocator.repository.fifoSweep()
+                    }
+                }.onFailure { Log.e(TAG, "endSession($sid) failed", it) }
+            } else {
+                Log.w(TAG, "stopActiveServer: currentSessionId=$sid, skipping endSession")
+            }
+            currentSessionId = -1L
+        }
+        if (mode == ServiceMode.Export) {
+            // 只在用户取消（Armed/Sending）时清；如果 zip 已发完（Done）保留
+            // exportMode 让 ExportingScreen 渲染"保留/删除"完成屏。用户在屏上
+            // 选择后会通过 ExportingViewModel.acknowledge() 自己清。
+            val em = ServiceLocator.session.exportMode.value
+            if (em is ExportMode.Armed || em is ExportMode.Sending) {
+                runCatching { ServiceLocator.session.clearExport() }
+            }
+        }
+        currentMode = null
+        pinAuth = null
+        currentHostIp = null
+        currentRequirePin = true
+        _running.value = null
+    }
+
+    /**
+     * Builds a Transfer-mode KtorServer. Called from startTransfer() and the
+     * rebind path after the previous engine was torn down — both flows use the
+     * same PinAuth/session wiring; only [host] changes on a rebind.
+     */
+    private fun buildTransferKtor(host: String, auth: PinAuth, startPort: Int): KtorServer = KtorServer(
+        host = host,
+        startPort = startPort,
+        endPort = LocalHostName.portRange(startPort).last,
+        pinAuth = auth,
+        session = ServiceLocator.session,
+        stats = ServiceLocator.stats,
+        fileStore = ServiceLocator.fileStore,
+        assetLoader = { path -> assets.open(path).use { it.readBytes() } },
+        currentSessionId = { currentSessionId },
+        onPersistMessage = { msg: Message ->
+            ServiceLocator.repository.appendMessage(currentSessionId, msg)
+        },
+        onRecallMessage = { messageId, callerSenderId ->
+            // 桥接 data 层 RecallOutcome → server 层 ServerRecallOutcome，保持
+            // server 包不反向依赖 data 包。
+            // v1.3 D26 修订：撤回 = 真删，repository 也同步从 SessionState 内存
+            // 移除消息让 ServingScreen 立即看到节点消失。
+            when (val out = ServiceLocator.repository.recallMessage(messageId, callerSenderId)) {
+                is SessionRepository.RecallOutcome.Success -> {
+                    ServiceLocator.session.removeMessage(out.messageId)
+                    if (out.wasFile) ServiceLocator.stats.decrementFileCount()
+                    ServiceLocator.notifyRecall()
+                    ServerRecallOutcome.Success(out.messageId, out.sessionId)
+                }
+                is SessionRepository.RecallOutcome.NotFound -> ServerRecallOutcome.NotFound
+                is SessionRepository.RecallOutcome.Denied -> ServerRecallOutcome.Denied // unreachable since v1.5.0 — recallMessage never returns Denied
+            }
+        },
+        recallEnabled = { latestSettings.recallBetaEnabled },
+        allowPeerRecall = { latestSettings.allowPeerRecall },
+        onFavoriteMessage = { msg ->
+            // D78：会话名与手机端在会话里收藏时同一份（「进行中会话」）。
+            try {
+                when (
+                    ServiceLocator.favoritesRepository.favoriteFromPeer(
+                        sid = currentSessionId,
+                        sessionName = getString(R.string.serving_active_session),
+                        msg = msg,
+                    )
+                ) {
+                    PeerFavoriteResult.Added -> ServerFavoriteOutcome.Added
+                    PeerFavoriteResult.AlreadyFavorited -> ServerFavoriteOutcome.AlreadyFavorited
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "peer favorite failed for message ${msg.id}", e)
+                ServerFavoriteOutcome.Failed
+            }
+        },
+        // 与 peer-info 的 allowPeerFavorite 同一判据：收藏功能与对端开关两轴都开。
+        peerFavoriteEnabled = { latestSettings.favoriteBetaEnabled && latestSettings.allowPeerFavorite },
+        favoritedIds = { ServiceLocator.favoritesRepository.favoritedIds(currentSessionId) },
+        onClientHello = { avatarKey, explicit ->
+            val stored = ServiceLocator.settingsRepository.browserAvatarKeyOrNull()
+            when (val decision = BrowserAvatarHelloPolicy.decide(explicit, stored)) {
+                is BrowserAvatarHelloDecision.Adopt -> {
+                    // Session first, then persist: the collector's diff check sees the session
+                    // already updated and stays silent (no echo back to the browser).
+                    ServiceLocator.session.setPeerAvatarKey(avatarKey)
+                    ServiceLocator.settingsRepository.setBrowserAvatarKey(avatarKey)
+                    null
+                }
+                is BrowserAvatarHelloDecision.PushBack -> decision.authoritativeKey
+            }
+        },
+        thumbnailGenerator = AndroidThumbnailGenerator(),
+        mode = ServiceMode.Transfer,
+        requirePin = currentRequirePin,
+        // M9: lambda reads the @Volatile field (not a closure-captured local) so
+        // each KtorServer rebuild on rebind picks up the latest settings without
+        // holding a stale reference to a previous KtorServer instance.
+        peerInfoProvider = {
+            currentPeerInfo(latestSettings)
+        },
+        webLanguageTagProvider = { AppLanguageManager.effectiveLanguageTag(this) },
+        favoritesProvider = {
+            // v1.19.0 fix wave: 每次 HTTP 请求都走 Flow.first() 会白白注册/注销一次
+            // InvalidationTracker observer；改用一次性快照读（snapshot()，与 exportSnapshot 同一模式）。
+            val (favorites, groups) = ServiceLocator.favoritesRepository.snapshot()
+            toFavoritesResponseDto(favorites = favorites, groups = groups)
+        },
+        favoriteRowFileResolver = { rowId ->
+            ServiceLocator.favoritesRepository.findFavoriteFileDetails(rowId)?.let { details ->
+                com.leoaristocrat.dashdrop.server.routes.FavoriteFileHandle(
+                    file = details.file,
+                    fileName = details.fileName,
+                    mime = details.mime,
+                )
+            }
+        },
+        // The app feature and peer gate are independent; both must be open for the browser.
+        favoriteEnabled = { latestSettings.favoriteBetaEnabled && latestSettings.favoriteBrowsingEnabled },
+        favoriteThumbFileProvider = { id -> ServiceLocator.favoriteFileStore.thumbnailFile(id) },
+        // 存储浏览：主开关只门控对端（App 端自己的文件 tab 不受它约束）。
+        // 权限判据取 data/PeerPrerequisites（与 App 端、peer-info 同一份）—— server 包不认识 Environment。
+        storageBrowserProvider = { ServiceLocator.storageBrowser },
+        storageBrowsingEnabled = { latestSettings.storageBrowsingEnabled },
+        hasStoragePermission = { hasAllFilesAccess() },
+        storageThumbFileProvider = { key -> ServiceLocator.fileStore.storageThumbFile(key) },
+        storageThumbnailCacheMaxBytes = { latestSettings.thumbnailCacheLimitMb * 1024L * 1024L },
+        albumBrowsingEnabled = { latestSettings.albumBrowsingEnabled },
+        albumAccessProvider = { currentAlbumAccess() },
+        mediaLibraryProvider = { ServiceLocator.mediaLibrary },
+        albumThumbFileProvider = { key -> ServiceLocator.fileStore.storageThumbFile(key) },
+    )
+
+    /**
+     * Builds an Export-mode KtorServer. Mirrors buildTransferKtor so the
+     * rebind path has a symmetric factory to call.
+     */
+    private fun buildExportKtor(host: String, auth: PinAuth, startPort: Int): KtorServer = KtorServer(
+        host = host,
+        startPort = startPort,
+        endPort = LocalHostName.portRange(startPort).last,
+        pinAuth = auth,
+        session = ServiceLocator.session,
+        stats = ServiceLocator.stats,
+        fileStore = ServiceLocator.fileStore,
+        assetLoader = { path -> assets.open(path).use { it.readBytes() } },
+        currentSessionId = { -1L },
+        onPersistMessage = { /* no-op in export mode — export routes don't write messages */ },
+        // Export 模式不挂 messageRoutes，撤回处理器永不被调用；显式 stub 是为了让
+        // 读代码的人立刻看到这点，不必去 KtorServer 翻默认值。
+        onRecallMessage = { _, _ -> ServerRecallOutcome.NotFound },
+        mode = ServiceMode.Export,
+        requirePin = currentRequirePin,
+        onZipSent = { handleZipSent() },
+        favoriteDepotFileResolver = { fileId ->
+            ServiceLocator.favoriteFileStore.resolve(fileId).takeIf { it.exists() && it.isFile }
+        },
+        peerInfoProvider = {
+            currentPeerInfo(latestSettings)
+        },
+        webLanguageTagProvider = { AppLanguageManager.effectiveLanguageTag(this) },
+    )
+
+    /**
+     * Register a [ConnectivityManager.NetworkCallback] scoped to Wi-Fi so we
+     * learn about IP changes (laptop hotspot → router, router → laptop hotspot,
+     * etc). Idempotent — second call during the same Service lifetime no-ops.
+     *
+     * Callbacks and a low-frequency hotspot/failure check both resample the
+     * current network source; delayed events never supply a stale address.
+     */
+    private fun registerNetworkCallbackIfNeeded() {
+        // Hotspot interfaces are not ConnectivityManager Wi-Fi networks. Also retry
+        // failed binds when the address stays unchanged and no callback is emitted.
+        if (networkWatchJob == null) {
+            networkWatchJob = scope.launch {
+                while (isActive) {
+                    delay(2000)
+                    refreshNetworkBinding()
+                }
+            }
+        }
+        if (networkCallback != null) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: run {
+                Log.w(TAG, "ConnectivityManager unavailable — rebind disabled")
+                return
+            }
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                scope.launch { refreshNetworkBinding() }
+            }
+
+            override fun onLost(network: Network) {
+                // An old Wi-Fi's onLost can arrive after the new network is usable.
+                // Resample the current source instead of declaring every loss global.
+                scope.launch { refreshNetworkBinding() }
+            }
+        }
+        runCatching {
+            cm.registerNetworkCallback(request, cb)
+        }.onSuccess {
+            networkCallback = cb
+        }.onFailure {
+            Log.w(TAG, "registerNetworkCallback failed: $it")
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        networkWatchJob?.cancel()
+        networkWatchJob = null
+        val cb = networkCallback ?: return
+        networkCallback = null
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        runCatching { cm.unregisterNetworkCallback(cb) }
+    }
+
+    /**
+     * Bridge one [LinkInfo] through the pure-logic [NetworkRebinder] and
+     * take the resulting action. Keeps the Android-specific callback body
+     * thin so the interesting state transitions are testable in T25.
+     */
+    @Synchronized
+    private fun refreshNetworkBinding() {
+        if (currentMode == null) return // Discard queued callbacks after deliberate stop.
+        handleLinkEvent(LinkInfo(ServiceLocator.networkInfo.currentWifiIpv4()))
+    }
+
+    private fun handleLinkEvent(info: LinkInfo) {
+        when (val intent = rebinder.onLink(info)) {
+            is RebindIntent.StayPut -> Unit
+            is RebindIntent.Lost -> {
+                // Don't stop Ktor here — the OS already invalidated the
+                // listening socket on its own. We'll rebuild it on the next
+                // Rebind (which the rebinder fires when an IP comes back,
+                // even if it's the same one we used to have).
+                ServiceLocator.session.updateNetworkStatus(NetworkStatus.Lost)
+            }
+            is RebindIntent.Rebind -> rebindTo(intent.newIp)
+        }
+    }
+
+    /**
+     * Stop the current Ktor engine and bring a new one up bound to [newIp].
+     * Preserves currentMode / pinAuth so in-flight session identity (PIN,
+     * sessionId, exportMode snapshot) survives the swap — only the socket
+     * re-opens on the new interface.
+     */
+    @Synchronized
+    private fun rebindTo(newIp: String) {
+        val mode = currentMode ?: return
+        val auth = pinAuth ?: return
+        if (!UsableIpPolicy.isUsable(newIp)) return
+        ServiceLocator.session.updateNetworkStatus(NetworkStatus.Switching)
+        val previous = ktor
+        ktor = null
+        runCatching { previous?.stop() }
+        // rebind 优先沿用本会话已绑端口（D75）。
+        val startPort = ServiceLocator.session.snapshot.value.boundPort.takeIf { it > 0 } ?: latestSettings.customPort
+        val replacement = when (mode) {
+            ServiceMode.Transfer -> buildTransferKtor(newIp, auth, startPort)
+            ServiceMode.Export -> buildExportKtor(newIp, auth, startPort)
+        }
+        val port = runCatching { replacement.start() }.getOrNull()
+        if (port == null) {
+            Log.e(TAG, "rebind to $newIp failed — no available port")
+            ServiceLocator.session.updateNetworkStatus(NetworkStatus.Lost)
+            ktor = null
+            rebinder.bindFailed(newIp)
+            return
+        }
+        // Rotate only after a successful host change: a failed attempt must not
+        // invalidate the cookie needed if the original Wi-Fi returns.
+        if (currentHostIp != newIp) auth.renewPin(IdGen.newPin())
+        ktor = replacement
+        rebinder.prime(newIp)
+        currentHostIp = newIp
+        if (latestSettings.localNameEnabled) {
+            // 编号取设置的最新值：用户点过「改用 N」后，rebind 不能把 Renamed 提示再报回来。
+            val wanted = latestSettings.hostNumber
+            if (wanted != null) mdns.updateIp(newIp, wanted) else mdns.updateIp(newIp)
+        }
+        ServiceLocator.session.updateBoundPort(port)
+        // Transfer-mode ServingViewModel keys its UI off _running (ip/port);
+        // refresh it so the screen shows the new URL too.
+        if (mode == ServiceMode.Transfer) {
+            val prev = _running.value
+            if (prev != null) {
+                _running.value = prev.copy(ip = newIp, port = port, pin = auth.currentPin() ?: prev.pin)
+            }
+        } else {
+            auth.currentPin()?.let { ServiceLocator.session.updateExportPin(it) }
+        }
+        // 通知栏 URL 也要随 rebind 刷新；不刷的话用户看到的还是旧 IP。
+        val notif = when (mode) {
+            ServiceMode.Transfer -> NotificationHelper.build(
+                context = this,
+                title = getString(R.string.service_transfer_title),
+                text = transferNotificationText(newIp, port),
+            )
+            ServiceMode.Export -> {
+                val armed = ServiceLocator.session.exportMode.value as? ExportMode.Armed
+                NotificationHelper.build(
+                    context = this,
+                    title = getString(R.string.service_export_title),
+                    text = armed?.let { exportNotificationBody(it.snapshot) }
+                        ?: getString(R.string.service_export_fallback),
+                )
+            }
+        }
+        val notifId = if (mode == ServiceMode.Export) EXPORT_NOTIFICATION_ID else NotificationHelper.NOTIFICATION_ID
+        runCatching {
+            (getSystemService(NOTIFICATION_SERVICE) as? android.app.NotificationManager)?.notify(notifId, notif)
+        }
+        ServiceLocator.session.updateNetworkStatus(
+            NetworkStatus.Switched(newUrl = "http://$newIp:$port")
+        )
+    }
+
+    @Synchronized
+    override fun onDestroy() {
+        unregisterNetworkCallback()
+        if (ktor != null || currentMode != null) {
+            stopActiveServer()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+        settingsCollectorJob?.cancel()
+        settingsCollectorJob = null
+        ServiceLocator.reset()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    /**
+     * Stable phone-side identity for recall authorization (D31).
+     * `Settings.Secure.ANDROID_ID` is a public API and yields a per-app, per-user
+     * 64-bit hex string that survives reinstalls of the same user profile but
+     * resets on factory reset. Falls back to "unknown" if the system returns
+     * null (rare; happens on some emulators before first boot completes).
+     */
+    private fun phoneSenderId(): String {
+        val androidId = runCatching {
+            Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+        }.getOrNull()
+        return "phone-${androidId ?: "unknown"}"
+    }
+
+    private fun transferNotificationText(ip: String, port: Int): String =
+        if (currentRequirePin) {
+            getString(R.string.service_transfer_with_pin, "http://$ip:$port")
+        } else {
+            getString(R.string.service_transfer_without_pin, "http://$ip:$port")
+        }
+
+    private fun exportNotificationBody(snapshot: ExportSnapshot): String {
+        val summary = ExportNotificationText.summary(snapshot)
+        val content = when (summary.scope) {
+            com.leoaristocrat.dashdrop.export.ExportScope.SESSIONS -> resources.getQuantityString(
+                R.plurals.service_export_sessions,
+                summary.itemCount,
+                summary.itemCount,
+            )
+            com.leoaristocrat.dashdrop.export.ExportScope.FAVORITES -> resources.getQuantityString(
+                R.plurals.service_export_favorites,
+                summary.itemCount,
+                summary.itemCount,
+            )
+            com.leoaristocrat.dashdrop.export.ExportScope.SETTINGS ->
+                getString(R.string.service_export_settings)
+            com.leoaristocrat.dashdrop.export.ExportScope.ALL ->
+                getString(R.string.service_export_all_data)
+        }
+        return getString(R.string.service_export_body, content, summary.formattedBytes)
+    }
+
+    companion object {
+        const val ACTION_START = "com.leoaristocrat.dashdrop.START"
+        const val ACTION_STOP = "com.leoaristocrat.dashdrop.STOP"
+        const val ACTION_EXPORT = "com.leoaristocrat.dashdrop.action.EXPORT"
+
+        /**
+         * M9: maps DashDropSettings.background → (backgroundMode, backgroundValue)
+         * using the same string encoding as SettingsRepository (DEFAULT/BLANK/SOLID/GRADIENT).
+         */
+        internal fun DashDropSettings.toPeerInfoDto(
+            systemDark: Boolean,
+            defaultDeviceName: String,
+            leadingColors: Map<String, List<String>> = emptyMap(),
+            // 系统前置条件由调用方现取（本函数纯映射、可单测）。默认 false = fail-closed：
+            // 漏传时浏览器看不到入口，而不是看到一个等授权的空壳（D76）。
+            storageAvailable: Boolean = false,
+            albumAvailable: Boolean = false,
+        ): PeerInfoDto {
+            val (mode, value) = when (val bg = background) {
+                is BackgroundSetting.Default -> "DEFAULT" to null
+                is BackgroundSetting.Blank -> "BLANK" to null
+                is BackgroundSetting.Solid -> "SOLID" to bg.argb.toString()
+                // BackgroundSetting.Gradient removed in v1.6.0 — handled by else in SettingsRepository.decodeBackground
+            }
+            // 双端主题对齐：浏览器跟随手机当前深浅 + 主题色相。动态色（Material You）由壁纸提取，
+            // 浏览器拿不到，故动态时 seed=null；预设与自定义主题都推同源 seed。
+            val resolvedDark = when (darkMode) {
+                DarkMode.SYSTEM -> systemDark
+                DarkMode.LIGHT -> false
+                DarkMode.DARK -> true
+            }
+            val seed = when (themeMode) {
+                ThemeMode.DYNAMIC -> null
+                ThemeMode.PRESET -> presetTheme.seedHex
+                ThemeMode.CUSTOM -> formatThemeSeed(customThemeSeedArgb)
+            }
+            return PeerInfoDto(
+                deviceName = deviceName.ifBlank { defaultDeviceName },
+                phoneAvatarId = phoneAvatarId,
+                phoneAvatarKey = phoneAvatarKey,
+                backgroundMode = mode,
+                backgroundValue = value,
+                themeSeed = seed,
+                themeDark = resolvedDark,
+                amoled = amoled,
+                bubbleCornerRadius = bubbleCornerRadius,
+                avatarGrouping = avatarGrouping.name,
+                messageActionStyle = messageActionStyle.name,
+                animationSpeed = animationSpeed.name,
+                sessionTimestampEnabled = sessionTimestampEnabled,
+                // 直接读生成常量，不走参数：只有一个正确取值，让调用点「可以传别的」
+                // 反而制造了漏传的可能。BuildConfig 是编译期常量，既不是 Context，
+                // 也不在 server/ 包里，不违反依赖红线。
+                appVersion = BuildConfig.VERSION_NAME,
+                recallEnabled = recallBetaEnabled,
+                allowPeerRecall = allowPeerRecall,
+                allowPeerFavorite = peerChannelState(favoriteBetaEnabled, allowPeerFavorite) ==
+                    PeerChannelState.On,
+                // 三个「对端能看到」通道只在两轴都开（On）时声明：浏览器据此渲染入口。
+                // 只看对端开关，未授权时会出现空壳入口、授权那一刻内容自己冒出来（D76）。
+                favoriteEnabled = peerChannelState(favoriteBetaEnabled, favoriteBrowsingEnabled) ==
+                    PeerChannelState.On,
+                storageBrowsingEnabled = peerChannelState(storageAvailable, storageBrowsingEnabled) ==
+                    PeerChannelState.On,
+                albumBrowsingEnabled = peerChannelState(albumAvailable, albumBrowsingEnabled) ==
+                    PeerChannelState.On,
+                leadingVisual = LeadingVisualDto(
+                    shape = leadingShape.id,
+                    colorMode = leadingColorMode.name,
+                    colors = leadingColors,
+                ),
+            )
+        }
+
+        const val EXPORT_NOTIFICATION_ID = 1002
+
+        private const val TAG = "TransferService"
+
+        private val FMT = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+    }
+}

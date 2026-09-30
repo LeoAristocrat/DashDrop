@@ -1,0 +1,64 @@
+package com.leoaristocrat.dashdrop.export
+
+import com.leoaristocrat.dashdrop.session.Origin
+import com.leoaristocrat.dashdrop.util.formatBytes
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
+/**
+ * Formats a [SessionExport] into the human-readable `messages.txt` content
+ * described in the v1.2 design spec (§4.3).
+ *
+ * Pure Kotlin: no Android dependencies. Time zone is injectable so tests can
+ * pin a deterministic zone (UTC) regardless of the host JVM default.
+ */
+object MessagesTextFormatter {
+
+    private const val TIMESTAMP_PATTERN = "yyyy-MM-dd HH:mm:ss"
+
+    fun format(
+        session: SessionExport,
+        timeZone: TimeZone = TimeZone.getDefault(),
+    ): String {
+        val dateFormat = SimpleDateFormat(TIMESTAMP_PATTERN, Locale.US).apply {
+            this.timeZone = timeZone
+        }
+
+        val messages = session.messages
+        val fileCount = messages.count { it is MessageExport.File }
+        val startedStr = dateFormat.format(Date(session.startedAt))
+        val endedStr = session.endedAt?.let { dateFormat.format(Date(it)) } ?: "In progress"
+
+        val sb = StringBuilder()
+        sb.append("# Session: ").append(session.name).append('\n')
+        sb.append("# sessionId: ").append(session.id).append('\n')
+        sb.append("# Range: ").append(startedStr).append(" ~ ").append(endedStr).append('\n')
+        sb.append("# Messages: ").append(messages.size).append(", Files: ")
+            .append(fileCount).append('\n')
+        sb.append('\n')
+
+        for (msg in messages) {
+            val ts = dateFormat.format(Date(msg.ts))
+            val originTag = formatOrigin(msg.origin)
+            sb.append('[').append(ts).append("] ").append(originTag).append(' ')
+            when (msg) {
+                is MessageExport.Text -> sb.append(msg.content)
+                is MessageExport.File -> sb.append("[File] ")
+                    .append(msg.name)
+                    .append(" (")
+                    .append(formatBytes(msg.sizeBytes))
+                    .append(')')
+            }
+            sb.append('\n')
+        }
+
+        return sb.toString()
+    }
+
+    private fun formatOrigin(origin: Origin): String = when (origin) {
+        Origin.PHONE -> "[PHONE  ]"
+        Origin.BROWSER -> "[BROWSER]"
+    }
+}

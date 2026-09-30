@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en" class="mdui-theme-auto">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title data-i18n="export.title">DashDrop Export</title>
+    <link rel="stylesheet" href="/static/vendor/mdui.css">
+    <link rel="stylesheet" href="/static/base.css">
+    <link rel="stylesheet" href="/static/springs.css">
+    <link rel="stylesheet" href="/static/tokens.css">
+    <link rel="stylesheet" href="/static/pages.css">
+</head>
+<body>
+    <div class="fk-single">
+        <main class="fk-card fk-card--wide">
+            <div class="fk-export-head">
+                <img class="fk-export-logo" src="/static/dashdrop-logo-slow.svg" alt="DashDrop">
+                <h1 class="fk-export-title" data-i18n="export.title">DashDrop Export</h1>
+            </div>
+
+            <!-- v1.3 B9 (T27): health-probe disconnect banner. Toggled by
+                 export.js via the `hidden` attribute; text written through
+                 textContent (no innerHTML, per browser red lines). -->
+            <div id="export-banner" class="fk-banner" role="status" aria-live="polite" hidden></div>
+
+            <div class="fk-summary">
+                <span class="fk-summary-label" data-i18n="export.pending">Upcoming download</span>
+                <span class="fk-summary-value" id="summary" data-i18n="export.loading">Loading…</span>
+            </div>
+
+            <div class="fk-sessions" id="sessions-card" hidden>
+                <p class="fk-subtitle" data-i18n="export.session_list">Session list</p>
+                <mdui-list id="session-list"></mdui-list>
+            </div>
+
+            <button class="fk-btn" id="download-btn" type="button"
+                    data-i18n="export.preparing" disabled>Preparing…</button>
+
+            <p class="fk-hint" id="export-hint" data-i18n="export.hint">
+                Tip: Downloads are handled by the browser. You can keep this page open until the download finishes.
+            </p>
+        </main>
+    </div>
+
+    <mdui-snackbar id="snackbar" placement="bottom"></mdui-snackbar>
+
+    <mdui-dialog id="export-cancel-dialog" close-on-overlay-click="true" close-on-esc="true" headline="Export cancelled" data-i18n-headline="export.cancelled_title">
+        <div class="fk-dialog-body" data-i18n="export.cancelled_body">The export was cancelled on your phone. To export again, please restart from your phone.</div>
+        <mdui-button slot="action" data-action="ok" data-i18n="common.got_it" variant="text">Got it</mdui-button>
+    </mdui-dialog>
+
+    <script src="/static/vendor/mdui.global.js"></script>
+    <script src="/static/i18n.js"></script>
+    <script src="/static/snackbar.js"></script>
+    <script src="/static/export.js"></script>
+</body>
+</html>

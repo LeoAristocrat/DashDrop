@@ -1,0 +1,285 @@
+package com.leoaristocrat.dashdrop.ui.exporting
+
+import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
+import com.leoaristocrat.dashdrop.R
+import com.leoaristocrat.dashdrop.data.FavoritesRepository
+import com.leoaristocrat.dashdrop.data.SessionRepository
+import com.leoaristocrat.dashdrop.data.settings.SettingsRepository
+import com.leoaristocrat.dashdrop.di.ServiceLocator
+import com.leoaristocrat.dashdrop.export.ExportMode
+import com.leoaristocrat.dashdrop.export.ExportScope
+import com.leoaristocrat.dashdrop.export.ExportSession
+import com.leoaristocrat.dashdrop.export.ExportSnapshot
+import com.leoaristocrat.dashdrop.export.ZipImporter
+import com.leoaristocrat.dashdrop.service.TransferService
+import com.leoaristocrat.dashdrop.session.SessionState
+import com.leoaristocrat.dashdrop.util.IdGen
+import kotlinx.coroutines.flow.first
+import java.util.zip.ZipFile
+
+class ArchiveViewModel @JvmOverloads constructor(
+    app: Application,
+    private val settingsRepository: SettingsRepository = ServiceLocator.settingsRepository,
+    private val sessionRepository: SessionRepository = ServiceLocator.repository,
+    private val favoritesRepository: FavoritesRepository = ServiceLocator.favoritesRepository,
+    private val sessionState: SessionState = ServiceLocator.session,
+    private val pinGenerator: () -> String = { IdGen.newPin() },
+    private val now: () -> Long = { System.currentTimeMillis() },
+    private val localExportWriter: suspend (Uri, ExportSnapshot) -> Unit = { uri, snapshot ->
+        LocalExportWriter.write(
+            context = app,
+            uri = uri,
+            snapshot = snapshot,
+            sessionFileResolver = { sessionId, fileId ->
+                ServiceLocator.fileStore.fileDir(sessionId).resolve(fileId)
+                    .takeIf { it.exists() && it.isFile }
+            },
+            favoriteFileResolver = { fileId ->
+                ServiceLocator.favoriteFileStore.resolve(fileId)
+                    .takeIf { it.exists() && it.isFile }
+            },
+        )
+    },
+) : AndroidViewModel(app) {
+
+    sealed class ExportStartResult {
+        data object Success : ExportStartResult()
+        data object TransferRunning : ExportStartResult()
+        data object NoFavorites : ExportStartResult()
+        data object UseSessionSelection : ExportStartResult()
+    }
+
+    data class ImportResult(
+        val importedSessions: Int,
+        val skippedSessions: Int,
+        val importedFavorites: Int,
+        val skippedFavorites: Int,
+        val settingsImported: Boolean,
+        val errors: List<String>,
+    )
+
+    suspend fun startExport(scope: ExportScope): ExportStartResult {
+        if (scope == ExportScope.SESSIONS) return ExportStartResult.UseSessionSelection
+        if (isTransferOrExportRunning()) return ExportStartResult.TransferRunning
+
+        val snapshot = buildExportSnapshot(scope) ?: return ExportStartResult.NoFavorites
+        val currentSettings = settingsRepository.settings.first()
+        val exportSession = ExportSession(
+            sessionIds = snapshot.sessions.map { it.id },
+            pin = pinGenerator(),
+            createdAt = now(),
+            requirePin = currentSettings.requirePin,
+            scope = scope,
+            favoriteCount = snapshot.favorites.size,
+            settingsIncluded = snapshot.settings != null,
+        )
+        sessionState.clearExport()
+        sessionState.armExport(exportSession, snapshot)
+
+        val context = getApplication<Application>()
+        context.startForegroundService(
+            Intent(context, TransferService::class.java).apply {
+                action = TransferService.ACTION_EXPORT
+            }
+        )
+        return ExportStartResult.Success
+    }
+
+    suspend fun saveExport(scope: ExportScope, uri: Uri): ExportStartResult {
+        if (scope == ExportScope.SESSIONS) return ExportStartResult.UseSessionSelection
+        val snapshot = buildExportSnapshot(scope) ?: return ExportStartResult.NoFavorites
+        localExportWriter(uri, snapshot)
+        return ExportStartResult.Success
+    }
+
+    private suspend fun buildExportSnapshot(scope: ExportScope): ExportSnapshot? = when (scope) {
+        ExportScope.SESSIONS -> error("Session export is owned by HomeScreen selection")
+        ExportScope.FAVORITES -> {
+            val favorites = favoritesRepository.exportSnapshot()
+            if (favorites.favorites.isEmpty()) null else ExportSnapshot(
+                exportedAt = now(),
+                scope = ExportScope.FAVORITES,
+                favoriteGroups = favorites.groups,
+                favorites = favorites.favorites,
+            )
+        }
+        ExportScope.SETTINGS -> ExportSnapshot(
+            exportedAt = now(),
+            scope = ExportScope.SETTINGS,
+            settings = settingsRepository.exportBackup(),
+        )
+        ExportScope.ALL -> {
+            val sessions = sessionRepository.exportAllSnapshot()
+            val favorites = favoritesRepository.exportSnapshot()
+            sessions.copy(
+                scope = ExportScope.ALL,
+                favoriteGroups = favorites.groups,
+                favorites = favorites.favorites,
+                settings = settingsRepository.exportBackup(),
+            )
+        }
+    }
+
+    private fun isTransferOrExportRunning(): Boolean {
+        if (sessionState.snapshot.value.currentSessionId != null) return true
+        return when (sessionState.exportMode.value) {
+            is ExportMode.Armed, is ExportMode.Sending -> true
+            else -> false
+        }
+    }
+
+    suspend fun importFromZip(uri: Uri): ImportResult = copyAndImport(uri, favoritesOnly = false)
+
+    suspend fun importFavoritesFromZip(uri: Uri): ImportResult =
+        copyAndImport(uri, favoritesOnly = true)
+
+    private suspend fun copyAndImport(uri: Uri, favoritesOnly: Boolean): ImportResult {
+        val context = getApplication<Application>()
+        val tempFile = java.io.File(context.filesDir, "archive_import_temp.zip")
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tempFile.outputStream().use { output -> input.copyTo(output) }
+            } ?: return ImportResult(
+                0,
+                0,
+                0,
+                0,
+                false,
+                listOf(context.getString(R.string.archive_read_failed)),
+            )
+            return runImport(tempFile, overwriteExisting = false, favoritesOnly = favoritesOnly)
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    private suspend fun runImport(
+        tempFile: java.io.File,
+        overwriteExisting: Boolean,
+        favoritesOnly: Boolean,
+    ): ImportResult {
+        val context = getApplication<Application>()
+        val sessionResult = if (favoritesOnly) null else
+            sessionRepository.importSessions(tempFile, overwriteExisting)
+        if (sessionResult?.errors?.any { it.name == "zip" } == true) {
+            return ImportResult(
+                importedSessions = 0,
+                skippedSessions = 0,
+                importedFavorites = 0,
+                skippedFavorites = 0,
+                settingsImported = false,
+                errors = sessionResult.errors.map { it.error },
+            )
+        }
+        val sessionIdMap = buildMap {
+            sessionResult?.imported.orEmpty().forEach { imported ->
+                imported.originalId?.let { put(it, imported.newId) }
+            }
+            sessionResult?.skipped.orEmpty().forEach { skipped ->
+                val originalId = skipped.originalId
+                val existingId = skipped.existingId
+                if (originalId != null && existingId != null) put(originalId, existingId)
+            }
+        }
+
+        var favoritesResult = FavoritesRepository.ImportResult(0, 0, emptyList())
+        var settingsImported = false
+        val archiveErrors = mutableListOf<String>()
+        runCatching {
+            ZipFile(tempFile).use { zip ->
+                val backup = ZipImporter.parseBackup(zip)
+                if (backup.favorites.isNotEmpty() || backup.favoriteGroups.isNotEmpty()) {
+                    favoritesResult = favoritesRepository.importBackup(backup, zip, sessionIdMap)
+                }
+                backup.settings?.takeUnless { favoritesOnly }?.let { settings ->
+                    settingsRepository.importBackup(settings)
+                    settingsImported = true
+                }
+            }
+        }.onFailure {
+            archiveErrors += it.message ?: context.getString(R.string.archive_parse_failed)
+        }
+
+        return ImportResult(
+            importedSessions = sessionResult?.imported?.size ?: 0,
+            skippedSessions = sessionResult?.skipped?.size ?: 0,
+            importedFavorites = favoritesResult.imported,
+            skippedFavorites = favoritesResult.skipped,
+            settingsImported = settingsImported,
+            errors = sessionResult?.errors.orEmpty().map { it.error } +
+                favoritesResult.errors + archiveErrors,
+        )
+    }
+
+    sealed class ImportStart {
+        data class Done(val result: ImportResult) : ImportStart()
+        data class NeedsDecision(val conflictCount: Int) : ImportStart()
+    }
+
+    private var stagedImportFile: java.io.File? = null
+
+    suspend fun beginImport(uri: Uri): ImportStart {
+        val context = getApplication<Application>()
+        cancelImport()
+        val tempFile = java.io.File(context.filesDir, "archive_import_temp.zip")
+        val copied = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tempFile.outputStream().use { output -> input.copyTo(output) }
+            } != null
+        }.getOrDefault(false)
+        if (!copied) {
+            tempFile.delete()
+            return ImportStart.Done(
+                ImportResult(
+                    0,
+                    0,
+                    0,
+                    0,
+                    false,
+                    listOf(context.getString(R.string.archive_read_failed)),
+                )
+            )
+        }
+        val conflicts = sessionRepository.peekImportConflicts(tempFile)
+        if (conflicts.isEmpty()) {
+            return try {
+                ImportStart.Done(
+                    runImport(tempFile, overwriteExisting = false, favoritesOnly = false)
+                )
+            } finally {
+                tempFile.delete()
+            }
+        }
+        stagedImportFile = tempFile
+        return ImportStart.NeedsDecision(conflicts.size)
+    }
+
+    suspend fun resolveImport(overwriteExisting: Boolean): ImportResult {
+        val tempFile = stagedImportFile ?: return ImportResult(
+            0,
+            0,
+            0,
+            0,
+            false,
+            emptyList(),
+        )
+        stagedImportFile = null
+        return try {
+            runImport(tempFile, overwriteExisting, favoritesOnly = false)
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    fun cancelImport() {
+        stagedImportFile?.delete()
+        stagedImportFile = null
+    }
+
+    override fun onCleared() {
+        cancelImport()
+    }
+}

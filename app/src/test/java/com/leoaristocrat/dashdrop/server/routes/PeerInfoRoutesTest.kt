@@ -1,0 +1,170 @@
+package com.leoaristocrat.dashdrop.server.routes
+
+import com.leoaristocrat.dashdrop.server.PinAuth
+import com.leoaristocrat.dashdrop.server.dto.PeerInfoDto
+import com.leoaristocrat.dashdrop.server.dto.WebThemeDto
+import io.ktor.client.plugins.cookies.HttpCookies
+import io.ktor.client.request.get
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.install
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.routing.routing
+import io.ktor.server.testing.testApplication
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+/**
+ * M9 Task 9.2 — GET /api/peer-info
+ *
+ * Cases:
+ *  (a) No auth cookie → 401
+ *  (b) Valid cookie → 200 + JSON with deviceName/phoneAvatarId/backgroundMode
+ */
+class PeerInfoRoutesTest {
+
+    private val testPeerInfo = PeerInfoDto(
+        deviceName = "测试手机",
+        phoneAvatarId = 3,
+        backgroundMode = "GRADIENT",
+        backgroundValue = "sunset",
+        recallEnabled = true,
+        allowPeerRecall = true,
+        appVersion = "9.9.9",
+    )
+
+    private fun setupApp(provider: () -> PeerInfoDto): io.ktor.server.application.Application.() -> Unit = {
+        install(ContentNegotiation) { json() }
+        routing {
+            val pin = PinAuth(nowMs = { 0L }, pinSupplier = { "000000" }, tokenSupplier = { "TOK" })
+            val authGate = AuthGate(required = true, pinAuth = pin)
+            authRoutes(
+                authGate,
+                readAsset = { byteArrayOf() },
+                publicThemeProvider = {
+                    WebThemeDto(themeSeed = "#6750A4", themeDark = true, amoled = true, languageTag = "en")
+                },
+            )
+            peerInfoRoutes(authGate = authGate, provider = provider)
+        }
+    }
+
+    private suspend fun authenticate(http: io.ktor.client.HttpClient) {
+        val resp: HttpResponse = http.post("/api/auth") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"pin":"000000"}""")
+        }
+        assertEquals(HttpStatusCode.OK, resp.status)
+    }
+
+    @Test
+    fun `GET peer-info without cookie returns 401`() = testApplication {
+        application(setupApp { testPeerInfo })
+        val resp: HttpResponse = client.get("/api/peer-info")
+        assertEquals(HttpStatusCode.Unauthorized, resp.status)
+    }
+
+    @Test
+    fun `GET peer-info with valid cookie returns 200 and JSON fields`() = testApplication {
+        application(setupApp { testPeerInfo })
+        val http = createClient { install(HttpCookies) }
+        authenticate(http)
+
+        val resp: HttpResponse = http.get("/api/peer-info")
+        assertEquals(HttpStatusCode.OK, resp.status)
+
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        assertEquals("测试手机", body["deviceName"]!!.jsonPrimitive.content)
+        assertEquals(3, body["phoneAvatarId"]!!.jsonPrimitive.int)
+        assertEquals("GRADIENT", body["backgroundMode"]!!.jsonPrimitive.content)
+        assertEquals("sunset", body["backgroundValue"]!!.jsonPrimitive.content)
+        // Fresh-install message defaults are serialized so the browser mirrors the App.
+        assertEquals(10, body["bubbleCornerRadius"]!!.jsonPrimitive.int)
+        assertEquals("EACH", body["avatarGrouping"]!!.jsonPrimitive.content)
+        assertEquals(true, body["recallEnabled"]!!.jsonPrimitive.boolean)
+        assertEquals(true, body["allowPeerRecall"]!!.jsonPrimitive.boolean)
+        assertEquals("INLINE", body["messageActionStyle"]!!.jsonPrimitive.content)
+        assertEquals("STANDARD", body["animationSpeed"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `peer-info carries recall availability`() = testApplication {
+        application(setupApp { testPeerInfo.copy(recallEnabled = true, allowPeerRecall = true) })
+        val http = createClient { install(HttpCookies) }
+        authenticate(http)
+
+        val resp: HttpResponse = http.get("/api/peer-info")
+        assertEquals(HttpStatusCode.OK, resp.status)
+
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        assertEquals(true, body["recallEnabled"]!!.jsonPrimitive.boolean)
+        assertEquals(true, body["allowPeerRecall"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `peer-info carries the phone app version for the browser About panel`() = testApplication {
+        // 浏览器端是这个 App 的客户端，「关于」面板要回答的正是「我连的是哪个版本」。
+        // 除了 peer-info 之外没有任何端点携带版本号，所以这条就是它唯一的来源。
+        application(setupApp { testPeerInfo.copy(appVersion = "1.19.0") })
+        val http = createClient { install(HttpCookies) }
+        authenticate(http)
+
+        val resp: HttpResponse = http.get("/api/peer-info")
+        assertEquals(HttpStatusCode.OK, resp.status)
+
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        assertEquals("1.19.0", body["appVersion"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `peer-info carries messageActionStyle`() = testApplication {
+        application(setupApp { testPeerInfo.copy(messageActionStyle = "INLINE") })
+        val http = createClient { install(HttpCookies) }
+        authenticate(http)
+
+        val resp: HttpResponse = http.get("/api/peer-info")
+        assertEquals(HttpStatusCode.OK, resp.status)
+
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        assertEquals("INLINE", body["messageActionStyle"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `peer-info carries an explicit bubbleCornerRadius`() = testApplication {
+        application(setupApp { testPeerInfo.copy(bubbleCornerRadius = 24) })
+        val http = createClient { install(HttpCookies) }
+        authenticate(http)
+
+        val resp: HttpResponse = http.get("/api/peer-info")
+        assertEquals(HttpStatusCode.OK, resp.status)
+
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        assertEquals(24, body["bubbleCornerRadius"]!!.jsonPrimitive.int)
+    }
+
+    @Test
+    fun `web-theme is public and returns appearance fields`() = testApplication {
+        application(setupApp { testPeerInfo })
+
+        val resp: HttpResponse = client.get("/api/web-theme")
+        assertEquals(HttpStatusCode.OK, resp.status)
+
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        assertEquals("#6750A4", body["themeSeed"]!!.jsonPrimitive.content)
+        assertEquals(true, body["themeDark"]!!.jsonPrimitive.boolean)
+        assertEquals(true, body["amoled"]!!.jsonPrimitive.boolean)
+        assertEquals("en", body["languageTag"]!!.jsonPrimitive.content)
+        assertEquals(setOf("themeSeed", "themeDark", "amoled", "languageTag"), body.keys)
+    }
+}

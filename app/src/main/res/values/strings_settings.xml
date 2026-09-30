@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_section_theme_color">Theme &amp; color</string>
+    <string name="settings_theme">Theme</string>
+    <string name="settings_theme_follow_wallpaper">Follow wallpaper</string>
+    <string name="leading_shape_title">Icon shape</string>
+    <string name="leading_shape_summary">Leading shape for files and favorites</string>
+    <string name="leading_color_title">Icon colors</string>
+    <string name="leading_color_summary">Distinguish file types by color</string>
+    <string name="leading_color_theme">Monochrome</string>
+    <string name="leading_color_harmonized">Harmonized</string>
+    <string name="leading_color_fixed">Fixed</string>
+    <string name="leading_color_harmonized_option">Theme colors by file type</string>
+    <string name="leading_color_fixed_option">Vivid fixed colors</string>
+    <string name="leading_shape_arch">Arch</string>
+    <string name="leading_shape_circle">Circle</string>
+    <string name="leading_shape_square">Square</string>
+    <string name="leading_shape_pixel_circle">Pixel circle</string>
+    <string name="leading_shape_slanted">Slanted</string>
+    <string name="leading_shape_clover_8_leaf">Eight-leaf clover</string>
+    <string name="leading_shape_cookie_6_sided">Six-sided cookie</string>
+    <string name="leading_shape_cookie_12_sided">Twelve-sided cookie</string>
+    <string name="leading_shape_cookie_9_sided">Nine-sided cookie</string>
+    <string name="leading_shape_gem">Gem</string>
+    <string name="leading_shape_cookie_7_sided">Seven-sided cookie</string>
+    <string name="leading_shape_cookie_4_sided">Four-sided cookie</string>
+    <string name="leading_shape_pentagon">Pentagon</string>
+    <string name="leading_shape_pill">Pill</string>
+    <string name="leading_shape_clover_4_leaf">Four-leaf clover</string>
+    <string name="leading_shape_sunny">Sunny</string>
+    <string name="leading_shape_ghostish">Ghost</string>
+    <string name="leading_shape_soft_burst">Soft burst</string>
+    <string name="leading_shape_very_sunny">Very sunny</string>
+    <string name="leading_shape_oval">Oval</string>
+    <string name="leading_shape_fan">Fan</string>
+    <string name="leading_shape_burst">Burst</string>
+    <string name="leading_shape_puffy_diamond">Puffy diamond</string>
+    <string name="leading_shape_flower">Flower</string>
+    <string name="leading_shape_bun">Bun</string>
+    <string name="settings_dark_mode">Dark mode</string>
+    <string name="settings_dark_mode_system">Follow system</string>
+    <string name="settings_dark_mode_light">Always light</string>
+    <string name="settings_dark_mode_dark">Always dark</string>
+    <string name="settings_amoled">AMOLED black</string>
+    <string name="settings_amoled_summary">Use a pure black background in dark mode</string>
+    <string name="settings_animation_speed">Animation speed</string>
+    <string name="settings_animation_off">Off</string>
+    <string name="settings_animation_slow">Slow</string>
+    <string name="settings_animation_standard">Standard</string>
+    <string name="settings_animation_fast">Fast</string>
+
+    <string name="settings_section_identity">Identity</string>
+    <string name="settings_device_name">Device name</string>
+    <string name="settings_avatar">Avatar</string>
+    <string name="settings_default_device_name">My phone</string>
+
+    <string name="settings_section_session_appearance">Session appearance</string>
+    <string name="settings_bubble_corner">Bubble corners</string>
+    <string name="settings_avatar_display">Avatar display</string>
+    <string name="settings_avatar_first">First message in group</string>
+    <string name="settings_avatar_last">Last message in group</string>
+    <string name="settings_avatar_each">Every message</string>
+    <string name="settings_session_background">Active session background</string>
+    <string name="settings_session_timestamp">Session timestamps</string>
+    <string name="settings_session_timestamp_summary">Show send time when a new message is at least 5 minutes after the last timestamp, synced to browser</string>
+
+    <string name="settings_section_session_behavior">Session behavior</string>
+    <string name="settings_require_pin">Require a PIN to connect</string>
+    <string name="settings_require_pin_summary">When on, the browser must enter a 6-digit PIN. When off, anyone on the same Wi-Fi can connect using the address.</string>
+    <string name="settings_message_action_style">Message actions</string>
+    <string name="settings_message_action_floating">Floating toolbar</string>
+    <string name="settings_message_action_inline">Always visible</string>
+    <string name="settings_recall">Recall messages</string>
+    <string name="settings_recall_summary">Allow recalling your own messages</string>
+    <string name="settings_allow_peer_recall">Allow recalling peer messages</string>
+    <string name="settings_allow_peer_recall_summary">Allow both sides to recall messages sent by the other side</string>
+    <string name="settings_favorites">Favorites</string>
+    <string name="settings_favorites_summary">Show Favorites and allow messages to be saved</string>
+    <string name="settings_allow_back">Allow leaving an active session</string>
+    <string name="settings_allow_back_summary">Back is blocked by default to protect the session. Turn this on to view history while a session runs; Settings remains locked.</string>
+    <string name="settings_keep_screen_on">Keep screen on during session</string>
+    <string name="settings_access_address">Access address</string>
+    <string name="settings_access_address_ip_only">IP address only · port %1$d</string>
+    <string name="settings_local_name">Local name</string>
+    <string name="settings_local_name_summary">Open by a memorable name</string>
+    <string name="settings_host_number">Number (0–999)</string>
+    <string name="settings_host_number_error">Enter a whole number from 0 to 999, no leading zeros</string>
+    <string name="settings_port">Port (1024–65535)</string>
+    <string name="settings_port_error">Enter a whole number from 1024 to 65535</string>
+    <string name="settings_port_blocked">Browsers won\'t open this port, pick another</string>
+    <string name="settings_access_address_applies_next">Changes apply the next time the service starts</string>
+
+    <string name="settings_section_data">Data</string>
+    <string name="settings_history_limit">Saved session limit</string>
+    <string name="settings_history_unlimited">Unlimited</string>
+    <string name="settings_history_disabled">Do not save</string>
+    <string name="settings_history_default">Default (20)</string>
+    <string name="settings_thumbnail_cache">Thumbnail cache</string>
+    <string name="settings_thumbnail_cache_description">Image and video previews shown while browsing phone storage are cached on this device so they load faster next time.</string>
+    <string name="settings_thumbnail_cache_limit">Limit</string>
+    <string name="settings_thumbnail_cache_default">Default (100 MB)</string>
+    <string name="settings_thumbnail_cache_megabytes">%1$d MB</string>
+    <string name="settings_thumbnail_cache_none">Do not cache</string>
+    <string name="settings_thumbnail_cache_calculating">Calculating…</string>
+    <string name="settings_thumbnail_cache_usage">%1$s used / %2$s limit</string>
+    <string name="settings_thumbnail_cache_current_usage">Currently using %1$s</string>
+    <string name="settings_thumbnail_cache_clear">Clear cache</string>
+    <plurals name="settings_history_count">
+        <item quantity="one">%1$d session</item>
+        <item quantity="other">%1$d sessions</item>
+    </plurals>
+    <string name="settings_import_export">Import &amp; export</string>
+    <string name="settings_import_export_choose">Choose an action</string>
+    <string name="settings_import_export_summary">Back up, restore, or move your data</string>
+    <string name="settings_import">Import</string>
+    <string name="settings_import_summary">Restore from a DashDrop zip archive</string>
+    <string name="settings_export_sessions">Export sessions</string>
+    <string name="settings_export_sessions_summary">Choose sessions to export</string>
+    <string name="settings_export_favorites">Export favorites</string>
+    <string name="settings_export_favorites_summary">Export all favorites</string>
+    <string name="settings_export_settings">Export settings</string>
+    <string name="settings_export_settings_summary">Export current settings</string>
+    <string name="settings_export_all">Export everything</string>
+    <string name="settings_export_all_summary">Export sessions, favorites, and settings</string>
+
+    <string name="settings_section_about">About</string>
+    <string name="settings_version">Version</string>
+    <string name="settings_developer">Developer</string>
+    <string name="settings_developer_name">Developed and Maintained by Sayeem Sadik / Leo Aristocrat</string>
+    <string name="settings_website">Website</string>
+    <string name="settings_website_url">https://leoaristocrat.eu.cc/</string>
+    <string name="settings_open_source">Open source</string>
+    <string name="settings_open_source_summary">Ktor · mdui · Apache/MIT</string>
+    <string name="settings_open_source_open_failed">Couldn\'t open the link. Install a browser and try again.</string>
+
+    <!-- Update check -->
+    <string name="settings_check_update">Check updates</string>
+    <string name="settings_checking_update">Checking for updates</string>
+    <string name="settings_auto_check_update">Auto-check updates</string>
+    <string name="settings_update_available_title">New version %1$s available</string>
+    <string name="settings_update_download">Download</string>
+    <string name="settings_update_later">Later</string>
+    <string name="settings_update_latest">You are on the latest version</string>
+    <string name="settings_update_failed">Could not reach the update service. Try again later</string>
+
+    <string name="settings_device_name_limit">Up to 20 characters</string>
+    <string name="settings_history_custom">Custom</string>
+    <string name="settings_history_input_hint">0 = do not save, -1 = unlimited</string>
+
+    <string name="settings_importing">Importing…</string>
+    <string name="settings_preparing_export">Preparing export…</string>
+    <string name="settings_saving">Saving…</string>
+    <plurals name="settings_imported_sessions">
+        <item quantity="one">Imported %1$d session</item>
+        <item quantity="other">Imported %1$d sessions</item>
+    </plurals>
+    <plurals name="settings_imported_favorites">
+        <item quantity="one">%1$d favorite</item>
+        <item quantity="other">%1$d favorites</item>
+    </plurals>
+    <string name="settings_imported_settings">Settings restored</string>
+    <plurals name="settings_import_skipped">
+        <item quantity="one">Skipped %1$d duplicate</item>
+        <item quantity="other">Skipped %1$d duplicates</item>
+    </plurals>
+    <plurals name="settings_import_failed_count">
+        <item quantity="one">%1$d failed</item>
+        <item quantity="other">%1$d failed</item>
+    </plurals>
+    <string name="settings_import_empty">No importable data found</string>
+    <string name="settings_import_failed">Import failed. Make sure the selected file is a DashDrop zip archive.</string>
+    <string name="settings_export_saved">Saved to the selected location</string>
+    <string name="settings_no_favorites">No favorites to export</string>
+    <string name="settings_export_save_failed">Couldn\'t save. Try again or choose another location.</string>
+    <string name="settings_stop_transfer_first">Stop the current transfer or export first</string>
+    <string name="settings_export_prepare_failed">Couldn\'t prepare the export. Try again.</string>
+
+    <string name="theme_dynamic">Follow wallpaper (dynamic color)</string>
+    <string name="theme_dynamic_summary">Automatically extract colors on Android 12+</string>
+    <string name="theme_presets">Preset colors</string>
+    <string name="theme_custom">Custom color</string>
+    <string name="theme_custom_hex">Theme seed color</string>
+    <string name="theme_custom_summary">Enter a 6-digit hex color, such as #33618D</string>
+    <string name="theme_custom_invalid">Enter a valid #RRGGBB color</string>
+    <string name="theme_custom_palette">Saturation and brightness palette</string>
+    <string name="theme_custom_hue">Hue slider</string>
+    <string name="theme_custom_details">Hue %1$d°  Saturation %2$d%%  Brightness %3$d%%</string>
+    <string name="theme_contrast">Contrast</string>
+    <string name="theme_preset_danshu_red">Dawn red</string>
+    <string name="theme_preset_danzi_red">Crimson purple</string>
+    <string name="theme_preset_chengpi_yellow">Orange peel</string>
+    <string name="theme_preset_qiukui_yellow">Okra yellow</string>
+    <string name="theme_preset_anan_blue">Anan blue</string>
+    <string name="theme_preset_zhumu_gray">Nacre gray</string>
+    <string name="theme_preset_yingwu_green">Parrot green</string>
+    <string name="theme_preset_jiehua_purple">Mustard purple</string>
+    <string name="theme_preset_catppuccin_mocha">Catppuccin Mocha</string>
+    <string name="theme_preset_hacker">Hacker</string>
+    <string name="theme_contrast_system">System</string>
+    <string name="theme_contrast_standard">Standard</string>
+    <string name="theme_contrast_medium">Medium</string>
+    <string name="theme_contrast_high">High</string>
+
+    <string name="avatar_choose">Choose avatar</string>
+    <string name="avatar_filled_icons">Filled icons</string>
+    <string name="avatar_single_character">Single character</string>
+
+    <string name="background_title">Session background</string>
+    <string name="background_theme_solid">Solid colors from theme</string>
+    <string name="background_custom_hue">Custom hue</string>
+
+    <string name="settings_delete_all">Delete all data</string>
+    <string name="settings_delete_all_title">Delete all data?</string>
+    <string name="settings_delete_all_body">All sessions and messages, all favorites, and all received files will be permanently deleted. This cannot be undone.</string>
+    <string name="settings_delete_all_reset">Also reset settings</string>
+    <string name="settings_delete_all_confirm">Delete everything</string>
+    <string name="settings_delete_all_done">All data deleted</string>
+    <string name="settings_delete_all_blocked">A session is running; deletion is blocked</string>
+    <string name="settings_show_hidden">Show hidden files</string>
+    <string name="settings_show_hidden_summary">List items whose name starts with a dot while browsing storage. Most are system caches (.thumbnails, .trashed-*), so they are hidden by default.</string>
+</resources>

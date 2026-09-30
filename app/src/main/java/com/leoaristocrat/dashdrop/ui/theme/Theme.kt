@@ -1,0 +1,156 @@
+package com.leoaristocrat.dashdrop.ui.theme
+
+import android.app.Activity
+import android.app.UiModeManager
+import android.content.Context
+import android.os.Build
+import android.provider.Settings
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialExpressiveTheme
+import androidx.compose.material3.MotionScheme
+import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import com.leoaristocrat.dashdrop.data.settings.ContrastLevel
+import com.leoaristocrat.dashdrop.data.settings.DarkMode
+import com.leoaristocrat.dashdrop.data.settings.DashDropSettings
+import com.leoaristocrat.dashdrop.data.settings.ThemeMode
+
+val LocalDashDropSettings = compositionLocalOf { DashDropSettings() }
+val LocalFlikkySettings = LocalDashDropSettings
+
+/**
+ * 把用户对比度档解析成实际三档：[ContrastLevel.SYSTEM] 跟随系统无障碍对比度
+ * （API34+ `UiModeManager.getContrast()` 返回 0..1，按阈值分档；低版本回落标准），其余手动锁定。
+ */
+internal fun resolveContrast(level: ContrastLevel, context: Context): ResolvedContrast = when (level) {
+    ContrastLevel.STANDARD -> ResolvedContrast.STANDARD
+    ContrastLevel.MEDIUM -> ResolvedContrast.MEDIUM
+    ContrastLevel.HIGH -> ResolvedContrast.HIGH
+    ContrastLevel.SYSTEM -> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val c = context.getSystemService(UiModeManager::class.java)?.contrast ?: 0f
+            when {
+                c >= 0.67f -> ResolvedContrast.HIGH
+                c >= 0.34f -> ResolvedContrast.MEDIUM
+                else -> ResolvedContrast.STANDARD
+            }
+        } else ResolvedContrast.STANDARD
+    }
+}
+
+internal data class ResolvedDashDropTheme(
+    val colorScheme: ColorScheme,
+    val dark: Boolean,
+)
+internal typealias ResolvedFlikkyTheme = ResolvedDashDropTheme
+
+internal fun resolveDashDropTheme(
+    settings: DashDropSettings,
+    context: Context,
+    systemDark: Boolean,
+): ResolvedDashDropTheme {
+    val useDark = when (settings.darkMode) {
+        DarkMode.SYSTEM -> systemDark
+        DarkMode.LIGHT -> false
+        DarkMode.DARK -> true
+    }
+    val base = when {
+        settings.themeMode == ThemeMode.DYNAMIC && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+            if (useDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        else -> {
+            val contrast = resolveContrast(settings.contrastLevel, context)
+            when (settings.themeMode) {
+                ThemeMode.CUSTOM -> customScheme(settings.customThemeSeedArgb, useDark, contrast)
+                ThemeMode.DYNAMIC,
+                ThemeMode.PRESET,
+                -> presetScheme(settings.presetTheme, useDark, contrast)
+            }
+        }
+    }
+    return ResolvedDashDropTheme(
+        colorScheme = if (settings.amoled && useDark) amoledOverride(base) else base,
+        dark = useDark,
+    )
+}
+
+internal fun resolveFlikkyTheme(
+    settings: DashDropSettings,
+    context: Context,
+    systemDark: Boolean,
+): ResolvedDashDropTheme = resolveDashDropTheme(settings, context, systemDark)
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun DashDropTheme(settings: DashDropSettings, content: @Composable () -> Unit) {
+    val systemDark = isSystemInDarkTheme()
+    val context = LocalContext.current
+    val resolvedTheme = remember(
+        settings.themeMode,
+        settings.presetTheme,
+        settings.customThemeSeedArgb,
+        settings.contrastLevel,
+        settings.darkMode,
+        settings.amoled,
+        systemDark,
+        context,
+    ) {
+        resolveDashDropTheme(settings, context, systemDark)
+    }
+    val useDark = resolvedTheme.dark
+    val scheme = resolvedTheme.colorScheme
+    val leadingVisual = remember(settings.leadingShape, settings.leadingColorMode, scheme, useDark) {
+        LeadingVisualStyle(
+            shape = settings.leadingShape,
+            colors = resolveLeadingColors(settings.leadingColorMode, scheme, useDark),
+        )
+    }
+
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        DisposableEffect(useDark) {
+            val window = (view.context as Activity).window
+            androidx.core.view.WindowCompat.getInsetsController(window, view).apply {
+                // 浅色主题 → 深色系统栏图标；深色主题 → 浅色图标。状态栏与导航栏一起设，
+                // 配合 isNavigationBarContrastEnforced=false 让透明系统栏上的图标始终可读。
+                isAppearanceLightStatusBars = !useDark
+                isAppearanceLightNavigationBars = !useDark
+            }
+            onDispose {}
+        }
+    }
+
+    // 全局动画速度倍率 = 用户设置（阶段 2.1 接入，暂默认 1.0）× 系统 animatorDurationScale。
+    // 系统把动画关掉时 animatorDurationScale==0 → 倍率 0 → Motion 退化 snap，自动尊重 reduce-motion。
+    val systemAnimScale = remember(context) {
+        Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+    }
+    val motionScale = effectiveMotionScale(settings.animationSpeed, systemAnimScale)
+
+    CompositionLocalProvider(
+        LocalDashDropSettings provides settings,
+        LocalFlikkySettings provides settings,
+        LocalLeadingVisual provides leadingVisual,
+        LocalMotionScale provides motionScale,
+    ) {
+        MaterialExpressiveTheme(
+            colorScheme = scheme,
+            motionScheme = MotionScheme.expressive(),
+            typography = Typography,
+            shapes = DashDropShapes,
+            content = content,
+        )
+    }
+}
+
+@Composable
+fun FlikkyTheme(settings: DashDropSettings, content: @Composable () -> Unit) =
+    DashDropTheme(settings, content)

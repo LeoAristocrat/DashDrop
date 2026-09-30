@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DashDrop</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_section_general">General</string>
+    <string name="settings_language">Language</string>
+    <string name="language_system">Follow system</string>
+    <string name="language_english">English</string>
+    <string name="peer_permissions_title">Peer permissions</string>
+    <string name="peer_permissions_entry">Peer permissions</string>
+    <string name="peer_permissions_section_see">The peer can see</string>
+    <string name="peer_permissions_section_do">The peer can do</string>
+    <string name="peer_permissions_files">Files</string>
+    <string name="peer_permissions_files_summary">Let the computer browse this phone’s shared storage</string>
+    <string name="peer_permissions_files_need_permission">Storage permission needed · Grant</string>
+    <string name="peer_permissions_album">Album</string>
+    <string name="peer_permissions_album_summary">The peer can browse and download your photos and videos</string>
+    <string name="peer_permissions_album_need_permission">Photo access needed first · Grant</string>
+    <string name="peer_permissions_favorites">Favourites</string>
+    <string name="peer_permissions_favorites_summary">Let the computer see your favourites</string>
+    <string name="peer_permissions_favorites_need_feature">Turn on favourites first · Settings</string>
+    <string name="peer_permissions_recall_need_feature">Turn on recall first · Settings</string>
+    <string name="peer_permissions_favorite_messages">Let the peer favorite messages</string>
+    <string name="peer_permissions_favorite_messages_summary">The browser can save messages from this session to your favorites</string>
+    <string name="peer_permissions_visible_none">Nothing shared</string>
+    <string name="peer_permissions_visible_summary">Visible: %1$s</string>
+    <string name="peer_permissions_visible_sep">, </string>
+    <string name="storage_lock_peer_on">Peer can browse files · tap to close</string>
+    <string name="storage_lock_peer_off">Peer cannot browse files · tap to open</string>
+</resources>

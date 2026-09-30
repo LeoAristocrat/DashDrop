@@ -1,0 +1,428 @@
+package com.leoaristocrat.dashdrop.data.settings
+
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.runTest
+import com.leoaristocrat.dashdrop.util.LeadingColorMode
+import com.leoaristocrat.dashdrop.util.LeadingShape
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
+class SettingsRepositoryTest {
+    @get:Rule val tmp = TemporaryFolder()
+    private var storeIndex = 0
+
+    private fun makeStore(scope: TestScope): DataStore<Preferences> =
+        PreferenceDataStoreFactory.create(
+            scope = scope.backgroundScope,
+            produceFile = { tmp.newFile("settings-${storeIndex++}.preferences_pb") },
+        )
+
+    private fun makeRepo(scope: TestScope): SettingsRepository = SettingsRepository(makeStore(scope))
+
+    @Test fun in_memory_defaults_use_anan_blue_preset_theme() {
+        val s = FlikkySettings()
+
+        assertEquals(ThemeMode.PRESET, s.themeMode)
+        assertEquals(PresetTheme.ANAN_BLUE, s.presetTheme)
+        assertEquals(0xFF33618DL, s.customThemeSeedArgb)
+        assertEquals(10, s.bubbleCornerRadius)
+        assertEquals(true, s.recallBetaEnabled)
+        assertEquals(true, s.allowPeerRecall)
+        assertEquals(true, s.allowBackDuringSession)
+        assertEquals(MessageActionStyle.INLINE, s.messageActionStyle)
+        assertEquals(AvatarGroupingMode.EACH, s.avatarGrouping)
+        assertEquals(LeadingShape.Cookie9Sided, s.leadingShape)
+        assertEquals(LeadingColorMode.THEME, s.leadingColorMode)
+    }
+
+    @Test fun defaults_emitted_when_empty() = runTest {
+        val repo = makeRepo(this)
+        val s = repo.settings.first()
+        assertEquals(ThemeMode.PRESET, s.themeMode)
+        assertEquals(PresetTheme.ANAN_BLUE, s.presetTheme)
+        assertEquals(0xFF33618DL, s.customThemeSeedArgb)
+        assertEquals(20, s.historyRetainLimit)
+        assertEquals(10, s.bubbleCornerRadius)
+        assertEquals(true, s.recallBetaEnabled)
+        assertEquals(true, s.allowPeerRecall)
+        assertEquals(true, s.allowBackDuringSession)
+        assertEquals(false, s.favoriteBetaEnabled)
+        assertEquals(true, s.requirePin)
+        assertEquals("", s.deviceName)
+        assertEquals(MessageActionStyle.INLINE, s.messageActionStyle)
+        assertEquals(AvatarGroupingMode.EACH, s.avatarGrouping)
+        assertEquals(LeadingShape.Cookie9Sided, s.leadingShape)
+        assertEquals(LeadingColorMode.THEME, s.leadingColorMode)
+    }
+
+    @Test fun thumbnail_cache_limit_defaults_to_100_mb() = runTest {
+        assertEquals(listOf(0, 50, 100, 200), THUMBNAIL_CACHE_LIMIT_OPTIONS_MB)
+        assertEquals(100, makeRepo(this).settings.first().thumbnailCacheLimitMb)
+    }
+
+    @Test fun thumbnail_cache_limit_persists_a_supported_choice() = runTest {
+        val repo = makeRepo(this)
+        repo.setThumbnailCacheLimitMb(50)
+
+        assertEquals(50, repo.settings.first().thumbnailCacheLimitMb)
+    }
+
+    @Test fun unknown_thumbnail_cache_limit_falls_back_to_100_mb() = runTest {
+        val store = makeStore(this)
+        store.edit { it[intPreferencesKey("thumbnail_cache_limit_mb")] = 75 }
+
+        assertEquals(100, SettingsRepository(store).settings.first().thumbnailCacheLimitMb)
+    }
+
+    @Test fun thumbnail_cache_limit_backup_roundtrips() = runTest {
+        val sourceStore = makeStore(this)
+        sourceStore.edit { it[intPreferencesKey("thumbnail_cache_limit_mb")] = 200 }
+        val backup = SettingsRepository(sourceStore).exportBackup()
+        assertEquals(200, backup.thumbnailCacheLimitMb)
+
+        val target = makeRepo(this)
+        target.importBackup(backup)
+        assertEquals(200, target.settings.first().thumbnailCacheLimitMb)
+    }
+
+    @Test fun peer_favorite_backup_roundtrips() = runTest {
+        val source = makeRepo(this)
+        source.setFavoriteBeta(true)
+        source.setAllowPeerFavorite(true)
+        val backup = source.exportBackup()
+        assertEquals(true, backup.allowPeerFavorite)
+
+        val target = makeRepo(this)
+        target.importBackup(backup)
+        assertTrue(target.settings.first().allowPeerFavorite)
+    }
+
+    @Test fun leading_visual_settings_persist_and_emit() = runTest {
+        val repo = makeRepo(this)
+
+        repo.setLeadingShape(LeadingShape.Ghostish)
+        repo.setLeadingColorMode(LeadingColorMode.FIXED)
+
+        val settings = repo.settings.first()
+        assertEquals(LeadingShape.Ghostish, settings.leadingShape)
+        assertEquals(LeadingColorMode.FIXED, settings.leadingColorMode)
+    }
+
+    @Test fun unknown_leading_visual_values_fall_back_to_defaults() = runTest {
+        val repo = makeRepo(this)
+        repo.setRawLeadingVisualForTest("retired-shape", "retired-mode")
+
+        val settings = repo.settings.first()
+        assertEquals(LeadingShape.Cookie9Sided, settings.leadingShape)
+        assertEquals(LeadingColorMode.THEME, settings.leadingColorMode)
+    }
+
+    @Test fun leading_visual_backup_roundtrips() = runTest {
+        val source = makeRepo(this)
+        source.setLeadingShape(LeadingShape.Flower)
+        source.setLeadingColorMode(LeadingColorMode.HARMONIZED)
+
+        val backup = source.exportBackup()
+        assertEquals("flower", backup.leadingShape)
+        assertEquals("HARMONIZED", backup.leadingColorMode)
+
+        val target = makeRepo(this)
+        target.importBackup(backup)
+        assertEquals(LeadingShape.Flower, target.settings.first().leadingShape)
+        assertEquals(LeadingColorMode.HARMONIZED, target.settings.first().leadingColorMode)
+    }
+
+    @Test fun blank_device_name_restores_localized_default_sentinel() = runTest {
+        val repo = makeRepo(this)
+        repo.setDeviceName("Desk phone")
+        assertEquals("Desk phone", repo.settings.first().deviceName)
+
+        repo.setDeviceName("   ")
+        assertEquals("", repo.settings.first().deviceName)
+    }
+
+    @Test fun update_persists_and_emits() = runTest {
+        val repo = makeRepo(this)
+        repo.setRecallBeta(true)
+        repo.setAllowPeerRecall(true)
+        repo.setFavoriteBeta(true)
+        repo.setHistoryRetainLimit(-1)
+        repo.setDarkMode(DarkMode.DARK)
+        val s = repo.settings.first()
+        assertTrue(s.recallBetaEnabled)
+        assertTrue(s.allowPeerRecall)
+        assertTrue(s.favoriteBetaEnabled)
+        assertEquals(-1, s.historyRetainLimit)
+        assertEquals(DarkMode.DARK, s.darkMode)
+    }
+
+    @Test fun history_retain_limit_clamps_below_unlimited_sentinel() = runTest {
+        val repo = makeRepo(this)
+        repo.setHistoryRetainLimit(-99)
+        assertEquals(-1, repo.settings.first().historyRetainLimit)
+    }
+
+    @Test fun legacy_gradient_decodes_to_default() = runTest {
+        // 模拟 v1.5.x 升级上来的用户：DataStore 里残留一个 "GRADIENT" 背景值。
+        // v1.6.0 删掉了 Gradient 类型，decodeBackground 的 else 分支必须把它静默回退
+        // 为 Default 而不是崩溃。直接写裸 preference 值才能真正命中该分支。
+        val ds = PreferenceDataStoreFactory.create(
+            scope = backgroundScope,
+            produceFile = { tmp.newFile("legacy.preferences_pb") },
+        )
+        ds.edit {
+            it[stringPreferencesKey("bg_mode")] = "GRADIENT"
+            it[stringPreferencesKey("bg_value")] = "sunset"
+        }
+        val repo = SettingsRepository(ds)
+        assertEquals(BackgroundSetting.Default, repo.settings.first().background)
+    }
+
+    @Test fun solid_background_roundtrips() = runTest {
+        val repo = makeRepo(this)
+        repo.setBackground(BackgroundSetting.Solid(0xFFEEF1FAL))
+        assertEquals(BackgroundSetting.Solid(0xFFEEF1FAL), repo.settings.first().background)
+    }
+
+    @Test fun bubble_corner_clamped_and_persists() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(BUBBLE_CORNER_DEFAULT, repo.settings.first().bubbleCornerRadius)
+        repo.setBubbleCornerRadius(999)
+        assertEquals(BUBBLE_CORNER_MAX, repo.settings.first().bubbleCornerRadius)
+        repo.setBubbleCornerRadius(0)
+        assertEquals(BUBBLE_CORNER_MIN, repo.settings.first().bubbleCornerRadius)
+    }
+
+    @Test fun message_action_style_roundtrips() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(MessageActionStyle.INLINE, repo.settings.first().messageActionStyle)
+        repo.setMessageActionStyle(MessageActionStyle.FLOATING)
+        assertEquals(MessageActionStyle.FLOATING, repo.settings.first().messageActionStyle)
+    }
+
+    @Test fun custom_theme_seed_persists_and_backup_roundtrips() = runTest {
+        val source = makeRepo(this)
+        source.setCustomThemeSeed(0x0033618DL)
+        source.setThemeMode(ThemeMode.CUSTOM)
+
+        val saved = source.settings.first()
+        assertEquals(ThemeMode.CUSTOM, saved.themeMode)
+        assertEquals(0xFF33618DL, saved.customThemeSeedArgb)
+
+        val backup = source.exportBackup()
+        assertEquals(0xFF33618DL, backup.customThemeSeedArgb)
+
+        val target = makeRepo(this)
+        target.importBackup(backup)
+        val restored = target.settings.first()
+        assertEquals(ThemeMode.CUSTOM, restored.themeMode)
+        assertEquals(0xFF33618DL, restored.customThemeSeedArgb)
+    }
+
+    @Test fun storage_browsing_defaults_off_and_backup_roundtrips() = runTest {
+        val source = makeRepo(this)
+        // 默认必须是关：这是本版的安全裁决（spec 2.1），不是可有可无的初值。
+        assertEquals(false, source.settings.first().storageBrowsingEnabled)
+
+        source.setStorageBrowsingEnabled(true)
+        assertEquals(true, source.settings.first().storageBrowsingEnabled)
+
+        val backup = source.exportBackup()
+        assertEquals(true, backup.storageBrowsingEnabled)
+
+        val target = makeRepo(this)
+        target.importBackup(backup)
+        assertEquals(true, target.settings.first().storageBrowsingEnabled)
+    }
+
+    @Test fun avatar_grouping_roundtrips() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(AvatarGroupingMode.EACH, repo.settings.first().avatarGrouping)
+        repo.setAvatarGrouping(AvatarGroupingMode.LAST)
+        assertEquals(AvatarGroupingMode.LAST, repo.settings.first().avatarGrouping)
+        repo.setAvatarGrouping(AvatarGroupingMode.EACH)
+        assertEquals(AvatarGroupingMode.EACH, repo.settings.first().avatarGrouping)
+    }
+
+    @Test fun allow_back_during_session_roundtrips() = runTest {
+        val repo = makeRepo(this)
+        repo.setAllowBackDuringSession(false)
+        assertEquals(false, repo.settings.first().allowBackDuringSession)
+        repo.setAllowBackDuringSession(true)
+        assertTrue(repo.settings.first().allowBackDuringSession)
+    }
+
+    @Test fun session_timestamp_toggle_roundtrips() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(false, repo.settings.first().sessionTimestampEnabled)
+        repo.setSessionTimestampEnabled(true)
+        assertEquals(true, repo.settings.first().sessionTimestampEnabled)
+    }
+
+    @Test fun keep_screen_on_toggle_roundtrips() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(false, repo.settings.first().keepScreenOnDuringSession)
+        repo.setKeepScreenOnDuringSession(true)
+        assertEquals(true, repo.settings.first().keepScreenOnDuringSession)
+    }
+
+    @Test fun require_pin_roundtrips() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(true, repo.settings.first().requirePin)
+        repo.setRequirePin(false)
+        assertEquals(false, repo.settings.first().requirePin)
+        repo.setRequirePin(true)
+        assertEquals(true, repo.settings.first().requirePin)
+    }
+
+    @Test fun active_group_id_roundtrips_and_null_clears() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(null, repo.settings.first().activeGroupId)
+
+        repo.setActiveGroup(42L)
+        assertEquals(42L, repo.settings.first().activeGroupId)
+
+        repo.setActiveGroup(null)
+        assertEquals(null, repo.settings.first().activeGroupId)
+    }
+
+    @Test fun active_favorite_group_id_roundtrips_clamps_invalid_and_is_independent() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(null, repo.settings.first().activeFavoriteGroupId)
+
+        repo.setActiveGroup(7L)
+        repo.setActiveFavoriteGroup(42L)
+
+        var settings = repo.settings.first()
+        assertEquals(7L, settings.activeGroupId)
+        assertEquals(42L, settings.activeFavoriteGroupId)
+
+        repo.setActiveFavoriteGroup(0L)
+        settings = repo.settings.first()
+        assertEquals(7L, settings.activeGroupId)
+        assertEquals(null, settings.activeFavoriteGroupId)
+
+        repo.setActiveFavoriteGroup(-1L)
+        assertEquals(null, repo.settings.first().activeFavoriteGroupId)
+    }
+
+    @Test fun recent_favorite_ids_keep_latest_unique_five() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(emptyList<Long>(), repo.settings.first().recentFavoriteIds)
+
+        listOf(1L, 2L, 3L, 4L, 5L, 6L, 3L, -1L, 0L).forEach {
+            repo.recordRecentFavorite(it)
+        }
+
+        assertEquals(listOf(3L, 6L, 5L, 4L, 2L), repo.settings.first().recentFavoriteIds)
+    }
+
+    @Test fun backup_export_and_import_roundtrip_user_settings_without_navigation_state() = runTest {
+        val source = makeRepo(this)
+        source.setThemeMode(ThemeMode.PRESET)
+        source.setPresetTheme(PresetTheme.ANAN_BLUE)
+        source.setDarkMode(DarkMode.DARK)
+        source.setDeviceName("Backup phone")
+        source.setAllowPeerRecall(true)
+        source.setRequirePin(false)
+        source.setHistoryRetainLimit(-1)
+        source.setActiveGroup(99L)
+        source.setActiveFavoriteGroup(98L)
+        source.recordRecentFavorite(97L)
+
+        val backup = source.exportBackup()
+        val target = makeRepo(this)
+        target.setActiveGroup(5L)
+        target.setActiveFavoriteGroup(6L)
+        target.recordRecentFavorite(7L)
+        target.importBackup(backup)
+
+        val restored = target.settings.first()
+        assertEquals(ThemeMode.PRESET, restored.themeMode)
+        assertEquals(PresetTheme.ANAN_BLUE, restored.presetTheme)
+        assertEquals(DarkMode.DARK, restored.darkMode)
+        assertEquals("Backup phone", restored.deviceName)
+        assertEquals(true, restored.allowPeerRecall)
+        assertEquals(false, restored.requirePin)
+        assertEquals(-1, restored.historyRetainLimit)
+        assertEquals(5L, restored.activeGroupId)
+        assertEquals(6L, restored.activeFavoriteGroupId)
+        assertEquals(listOf(7L), restored.recentFavoriteIds)
+    }
+
+    @Test fun auto_check_update_defaults_off_and_persists() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(false, repo.settings.first().autoCheckUpdate)
+
+        repo.setAutoCheckUpdate(true)
+
+        assertEquals(true, repo.settings.first().autoCheckUpdate)
+    }
+
+    @Test fun update_check_state_defaults_and_roundtrip() = runTest {
+        val repo = makeRepo(this)
+        assertEquals(0L, repo.lastUpdateCheckAt())
+        assertEquals(null, repo.lastPromptedUpdateVersion())
+
+        repo.setLastUpdateCheckAt(123456L)
+        repo.setLastPromptedUpdateVersion("v1.18.0")
+
+        assertEquals(123456L, repo.lastUpdateCheckAt())
+        assertEquals("v1.18.0", repo.lastPromptedUpdateVersion())
+    }
+
+    @Test fun backup_includes_auto_check_update_only() = runTest {
+        val source = makeRepo(this)
+        source.setAutoCheckUpdate(true)
+        source.setLastUpdateCheckAt(999L)
+        source.setLastPromptedUpdateVersion("v9.9.9")
+        val backup = source.exportBackup()
+        assertEquals(true, backup.autoCheckUpdate)
+
+        val restored = makeRepo(this)
+        restored.importBackup(backup)
+        assertEquals(true, restored.settings.first().autoCheckUpdate)
+        assertEquals(0L, restored.lastUpdateCheckAt())
+        assertEquals(null, restored.lastPromptedUpdateVersion())
+    }
+
+    @Test fun browser_avatar_key_defaults_and_roundtrips() = runTest {
+        val repo = makeRepo(this)
+        assertEquals("icon:desktop_windows", repo.settings.first().browserAvatarKey)
+        assertEquals(null, repo.browserAvatarKeyOrNull())
+
+        repo.setBrowserAvatarKey("icon:star")
+
+        assertEquals("icon:star", repo.settings.first().browserAvatarKey)
+        assertEquals("icon:star", repo.browserAvatarKeyOrNull())
+    }
+
+    @Test fun backup_skips_browser_avatar_when_never_set_and_roundtrips_when_set() = runTest {
+        val unset = makeRepo(this)
+        assertEquals(null, unset.exportBackup().browserAvatarKey)
+
+        val source = makeRepo(this)
+        source.setBrowserAvatarKey("char:B")
+        val backup = source.exportBackup()
+        assertEquals("char:B", backup.browserAvatarKey)
+
+        val target = makeRepo(this)
+        target.importBackup(backup)
+        assertEquals("char:B", target.browserAvatarKeyOrNull())
+    }
+}

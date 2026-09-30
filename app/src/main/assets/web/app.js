@@ -1,0 +1,2427 @@
+(function () {
+    const list = document.getElementById('list');
+    const listShell = document.getElementById('chat-list-shell');
+    const saveAllDropdown = document.getElementById('save-all-dropdown');
+    const saveAllEachItem = document.getElementById('save-all-each');
+    const saveAllZipItem = document.getElementById('save-all-zip');
+    const saveAllFab = document.getElementById('save-all-fab');
+    const saveAllEachLabel = document.getElementById('save-all-each-label');
+    const input = document.getElementById('text-input');
+    const sendBtn = document.getElementById('send-btn');
+    const fileBtn = document.getElementById('file-btn');
+    const filePicker = document.getElementById('file-picker');
+    const conn = document.getElementById('conn');
+    const uptimeEl = document.getElementById('uptime');
+    const countEl = document.getElementById('count');
+    const rateEl = document.getElementById('rate');
+    const i18n = window.flikkyI18n;
+    let peerAppearanceRevision = 0;
+    function setWebConnectionActive(active) {
+        if (!active) peerAppearanceRevision++;
+        window.flikkyConnectionActive = !!active;
+        if (i18n.setConnected) i18n.setConnected(active);
+        const album = window.flikkyPanels && window.flikkyPanels.album;
+        if (album && album.setConnected) album.setConnected(active);
+    }
+    setWebConnectionActive(false);
+    const t = (key, values) => i18n.t(key, values);
+    const countText = (key, count) => i18n.count(key, count);
+    let lastStatus = null;
+    /** 上一次收到的「显示隐藏文件」值。null = 还没收到过，不触发失效。 */
+    let lastShowHiddenFiles = null;
+
+    function computeSaveAllState(files) {
+        return {
+            visible: files.length >= 2,
+            fileCount: files.length,
+        };
+    }
+
+    const ua = navigator.userAgent || '';
+    if (/Android|iPhone|iPad|iPod/i.test(ua)) {
+        document.body.classList.add('mobile-ua');
+    }
+
+    // Material Symbols are self-hosted; FILL uses the official variable-font axis.
+    function symbolName(name) {
+        return name === 'person' ? 'account_circle' : name;
+    }
+
+    function materialSymbolEl(name, filled, slot) {
+        const icon = document.createElement('span');
+        icon.className = 'material-symbols-outlined';
+        if (slot) icon.setAttribute('slot', slot);
+        icon.style.fontVariationSettings =
+            "'FILL' " + (filled ? 1 : 0) + ", 'wght' 400, 'GRAD' 0, 'opsz' 24";
+        // 字形由 base.css 的 ::before content: attr(data-icon) 生成，不是 DOM 文本 ——
+        // 手机浏览器的长按取词层不理 user-select，只有「没有文本」才真的选不到。
+        icon.dataset.icon = symbolName(name);
+        // 装饰性图标：字形来自 ::before 生成内容，多数读屏仍会朗读 `star` 这类内部
+        // 标识符。所有调用点的可访问名都来自兄弟 label 或控件自己的 aria-label，
+        // 因此在工厂里统一隐藏——新增调用点自动继承，不用逐处记得加。
+        icon.setAttribute('aria-hidden', 'true');
+        return icon;
+    }
+
+    // 文件气泡分类图标来自共享注册表，两端同一 MIME 必须显示同一 Material Symbol。
+    function fileSymbolName(mime) {
+        const leading = globalThis.flikkyLeading;
+        return leading && typeof leading.typeOf === 'function'
+            ? leading.typeOf(mime).symbol
+            : 'draft';
+    }
+    // 这一份是与 App 端 FilesListBuilder.categoryOf + FileCategory.iconResource() 对齐的
+    // 唯一事实源，收藏面板也取用它（发布点在文件末尾的 window.flikky 那一处——
+    // 不能写在这里：app-file-symbol.test.js 把这一段切出来在裸沙箱里跑，没有 window）。
+
+    const AVATAR_DEFAULT_BROWSER = 'icon:desktop_windows';
+    const AVATAR_DEFAULT_PHONE = 'icon:smartphone';
+    const AVATAR_LEGACY_KEYS = [
+        'icon:person',
+        'icon:star',
+        'icon:person',
+        'icon:person',
+        'icon:person',
+        'icon:person',
+        'icon:smartphone',
+        'icon:person',
+        'icon:person',
+        'icon:person',
+        'icon:person',
+        'icon:settings',
+    ];
+    const AVATAR_PRESETS = [
+        AVATAR_DEFAULT_BROWSER,
+        AVATAR_DEFAULT_PHONE,
+        'icon:person',
+        'icon:star:outline',
+        'icon:face',
+        'icon:palette',
+        'icon:image:outline',
+        'icon:settings:outline',
+    ];
+
+    function legacyAvatarKey(id, fallback) {
+        const idx = Number(id);
+        return Number.isInteger(idx) && idx >= 0 && idx < AVATAR_LEGACY_KEYS.length
+            ? AVATAR_LEGACY_KEYS[idx]
+            : fallback;
+    }
+
+    function normalizeAvatarKey(raw, fallback) {
+        const key = (typeof raw === 'string' ? raw.trim() : '');
+        if (key.startsWith('icon:') && key.slice(5).trim()) {
+            const parts = key.slice(5).split(':');
+            const name = (parts[0] || '').trim();
+            const style = (parts[1] || '').trim();
+            if (!name) return fallback;
+            if (style === 'filled' || style === 'outline') return 'icon:' + name + ':' + style;
+            return 'icon:' + name;
+        }
+        if (key.startsWith('char:') && key.slice(5).trim()) return 'char:' + Array.from(key.slice(5).trim())[0];
+        return fallback;
+    }
+
+    function defaultIconFilled(name) {
+        return name === 'star' || name === 'settings';
+    }
+
+    function avatarIconSpec(normalized) {
+        const parts = normalized.slice(5).split(':');
+        const name = (parts[0] || '').trim();
+        const style = (parts[1] || '').trim();
+        const filled = style === 'filled' ? true : style === 'outline' ? false : defaultIconFilled(name);
+        return { name, filled };
+    }
+
+    function clearAvatar(el) {
+        while (el.firstChild) el.removeChild(el.firstChild);
+        el.removeAttribute('icon');
+        el.textContent = '';
+    }
+
+    function renderAvatar(el, key) {
+        if (!el) return;
+        const normalized = normalizeAvatarKey(key, AVATAR_DEFAULT_BROWSER);
+        clearAvatar(el);
+        el.classList.add('avatar-circle');
+        if (normalized.startsWith('char:')) {
+            el.textContent = normalized.slice(5);
+            return;
+        }
+        const spec = avatarIconSpec(normalized);
+        const icon = materialSymbolEl(spec.name, spec.filled);
+        icon.classList.add('avatar-symbol');
+        el.appendChild(icon);
+    }
+
+    function makeAvatarEl(avatarKey) {
+        const el = document.createElement('mdui-avatar');
+        renderAvatar(el, avatarKey);
+        return el;
+    }
+
+    function readMyAvatarKey() {
+        const stored = localStorage.getItem('flikky_avatar_key');
+        if (stored) return normalizeAvatarKey(stored, AVATAR_DEFAULT_BROWSER);
+        const legacy = localStorage.getItem('flikky_avatar');
+        return legacy === null
+            ? AVATAR_DEFAULT_BROWSER
+            : legacyAvatarKey(legacy, AVATAR_DEFAULT_BROWSER);
+    }
+
+    let myAvatarKey = readMyAvatarKey();
+    let phoneAvatarKey = AVATAR_DEFAULT_PHONE;
+    let avatarPickerFilled = avatarIconSpec(normalizeAvatarKey(myAvatarKey, AVATAR_DEFAULT_BROWSER)).filled;
+    let avatarGrouping = 'EACH';
+    let recallEnabled = false;
+    let allowPeerRecall = false;
+    // D78：手机允许对端把会话消息收藏到手机（peer-info 只在收藏功能也开着时声明为真）。
+    let allowPeerFavorite = false;
+    // 本会话里手机已收藏的消息 id（字符串）。来源：历史接口 + `favorites_state` 推送（整体替换）。
+    // 手机上取消收藏也会推过来，星标随之变回空心（用户 2026-09-27）。
+    let favoritedIds = new Set();
+    // 每收藏成功一次就 +1 并发布到 body 上，收藏面板观察它重新拉取（app.js 不认识面板，D4 同一手法）。
+    let favoritesRev = 0;
+    // 消息操作样式（§12）：跟随 APP 设置，FLOATING=hover 浮条+右键，INLINE=常驻按钮行。
+    let actionStyle = 'INLINE';
+    function normalizeActionStyle(value) { return value === 'INLINE' ? 'INLINE' : 'FLOATING'; }
+
+    const MESSAGE_ENTER_BASE_DURATION_MS = 300;
+    function normalizeAnimationSpeed(value) {
+        return ['OFF', 'SLOW', 'STANDARD', 'FAST'].includes(value) ? value : 'STANDARD';
+    }
+    function animationDurationMs(value) {
+        switch (normalizeAnimationSpeed(value)) {
+            case 'OFF': return 0;
+            case 'SLOW': return 450;
+            case 'FAST': return 210;
+            default: return MESSAGE_ENTER_BASE_DURATION_MS;
+        }
+    }
+    function applyAnimationSpeed(value) {
+        document.documentElement.style.setProperty(
+            '--flikky-message-enter-duration', animationDurationMs(value) + 'ms',
+        );
+    }
+
+    const TIME_DIVIDER_GAP_MS = 5 * 60 * 1000;
+    let lastDividerBaseTs = null;
+
+    function formatSessionTimestamp(ms) {
+        const d = new Date(ms);
+        const p = (n) => String(n).padStart(2, '0');
+        return `${p(d.getFullYear() % 100)}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+
+    // 组内/组间标记通过时间分隔线打断：真正插入分隔线（而非跳过）时才置位，
+    // appendBubbleRow 消费后立刻清零，避免误伤下一条正常消息。
+    let pendingGroupBreak = false;
+
+    function maybeInsertTimeDivider(ts) {
+        if (!Number.isFinite(ts)) return;
+        if (lastDividerBaseTs === null || ts - lastDividerBaseTs >= TIME_DIVIDER_GAP_MS) {
+            const row = document.createElement('div');
+            row.className = 'time-divider';
+            const pill = document.createElement('span');
+            pill.className = 'time-divider-pill';
+            pill.textContent = formatSessionTimestamp(ts);
+            row.appendChild(pill);
+            list.appendChild(row);
+            lastDividerBaseTs = ts;
+            pendingGroupBreak = true;
+        }
+    }
+
+    // Track last rendered origin for consecutive same-origin suppression.
+    // 'PHONE' | 'BROWSER' | null
+    let lastBubbleOrigin = null;
+
+    // loadHistory() 回放历史时走的是同一条 appendBubbleRow 路径；回放不是「到达」，
+    // 不该播入场动画，否则每次打开页面整屏消息一起飞进来。
+    let replayingHistory = false;
+
+    // Wrap a bubble div in a bubble-row that includes the appropriate avatar
+    // or spacer. `origin` is 'PHONE' | 'BROWSER'.
+    // Returns the row element (appended to list).
+    function appendBubbleRow(bubbleEl, origin) {
+        const mine = origin === 'BROWSER';
+        const isContinuation = origin === lastBubbleOrigin;
+        lastBubbleOrigin = origin;
+
+        const row = document.createElement('div');
+        row.className = 'bubble-row ' + (mine ? 'me' : 'them');
+        if (!replayingHistory) row.classList.add('bubble-row--enter');
+        if (pendingGroupBreak) { row.dataset.groupBreak = '1'; pendingGroupBreak = false; }
+
+        if (isContinuation) {
+            // Same origin in a row: show spacer instead of avatar.
+            const spacer = document.createElement('div');
+            spacer.className = 'avatar-spacer';
+            row.appendChild(spacer);
+        } else {
+            const avatarEl = makeAvatarEl(mine ? myAvatarKey : phoneAvatarKey);
+            row.appendChild(avatarEl);
+        }
+        row.appendChild(bubbleEl);
+        renderMessageActionBar(row, bubbleEl);
+
+        list.appendChild(row);
+        reflowMessageAvatars();
+        list.scrollTop = list.scrollHeight;
+        return row;
+    }
+
+    function rowOrigin(row) {
+        if (!row) return null;
+        if (row.classList.contains('me')) return 'BROWSER';
+        if (row.classList.contains('them')) return 'PHONE';
+        return null;
+    }
+
+    function makeAvatarSpacer() {
+        const spacer = document.createElement('div');
+        spacer.className = 'avatar-spacer';
+        return spacer;
+    }
+
+    function setRowAvatarMarker(row, origin, showAvatar) {
+        const marker = showAvatar
+            ? makeAvatarEl(origin === 'BROWSER' ? myAvatarKey : phoneAvatarKey)
+            : makeAvatarSpacer();
+        const current = row.children[0];
+        if (current && (current.classList.contains('avatar-circle') || current.classList.contains('avatar-spacer'))) {
+            row.insertBefore(marker, current);
+            current.remove();
+        } else {
+            row.insertBefore(marker, row.firstChild);
+        }
+    }
+
+    function normalizeAvatarGrouping(value) {
+        return value === 'FIRST' || value === 'LAST' || value === 'EACH' ? value : 'EACH';
+    }
+
+    function shouldShowAvatarForRow(origin, previousOrigin, nextOrigin) {
+        switch (avatarGrouping) {
+            case 'LAST':
+                return origin !== nextOrigin;
+            case 'EACH':
+                return true;
+            case 'FIRST':
+            default:
+                return origin !== previousOrigin;
+        }
+    }
+
+    // 组内/组间标记。singleton 不加类：完整圆角 + 16px 间距就是它该有的样子。
+    function applyGroupingClasses(row, sameAsPrev, sameAsNext) {
+        row.classList.remove('grouped-start', 'grouped-mid', 'grouped-end');
+        if (sameAsPrev && sameAsNext) row.classList.add('grouped-mid');
+        else if (sameAsNext) row.classList.add('grouped-start');
+        else if (sameAsPrev) row.classList.add('grouped-end');
+    }
+
+    function reflowMessageAvatars() {
+        const rows = Array.from(list.querySelectorAll('.bubble-row'));
+        let previousOrigin = null;
+        rows.forEach((row, index) => {
+            const origin = rowOrigin(row);
+            if (!origin) return;
+            const nextOrigin = rowOrigin(rows[index + 1]);
+            setRowAvatarMarker(row, origin, shouldShowAvatarForRow(origin, previousOrigin, nextOrigin));
+            const breakBefore = (r) => !!(r && r.dataset && r.dataset.groupBreak);
+            const sameAsPrev = origin === previousOrigin && !breakBefore(row);
+            const sameAsNext = origin === nextOrigin && !breakBefore(rows[index + 1]);
+            applyGroupingClasses(row, sameAsPrev, sameAsNext);
+            previousOrigin = origin;
+        });
+        lastBubbleOrigin = previousOrigin;
+    }
+
+    // Update the header avatar and name for the peer.
+    function renderPeerHeader(deviceName, avatarKey) {
+        const peerAvatarEl = document.getElementById('peer-avatar');
+        const peerNameEl = document.getElementById('peer-name');
+        renderAvatar(peerAvatarEl, avatarKey);
+        if (peerNameEl) {
+            peerNameEl.textContent = t('app.peer_from', { device: deviceName });
+        }
+    }
+
+    // Render the my-avatar button in the header.
+    function renderMyAvatarBtn() {
+        const btn = document.getElementById('my-avatar-btn');
+        if (!btn) return;
+        renderAvatar(btn, myAvatarKey);
+    }
+
+    function refreshBrowserMessageAvatars() {
+        list.querySelectorAll('.bubble-row.me > .avatar-circle').forEach((avatarEl) => {
+            renderAvatar(avatarEl, myAvatarKey);
+        });
+    }
+
+    // Convert an ARGB Long string (e.g. "4294944066") to a CSS color string.
+    // ARGB: bits 31-24 = alpha, 23-16 = R, 15-8 = G, 7-0 = B.
+    function argbLongToCss(str) {
+        const n = Number(str);
+        if (!Number.isFinite(n)) return null;
+        // Use unsigned 32-bit arithmetic.
+        const argb = n >>> 0;
+        const r = (argb >>> 16) & 0xFF;
+        const g = (argb >>> 8) & 0xFF;
+        const b = argb & 0xFF;
+        const a = ((argb >>> 24) & 0xFF) / 255;
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + a.toFixed(3) + ')';
+    }
+
+    let currentBackgroundMode = 'DEFAULT';
+    let currentDeviceName = t('app.phone');
+    let connectionWatermarkState = 'connected';
+
+    function defaultWatermarkText() {
+        const status = connectionWatermarkState === 'disconnected'
+            ? t('app.disconnected')
+            : t('app.connected');
+        return t('app.watermark', { status, device: currentDeviceName });
+    }
+
+    function refreshDefaultWatermark() {
+        if (currentBackgroundMode === 'DEFAULT') {
+            setWatermark(defaultWatermarkText());
+        }
+    }
+
+    function setConnectionWatermarkState(state) {
+        connectionWatermarkState = state;
+        refreshDefaultWatermark();
+    }
+
+    // Apply conversation background to the list element based on peer-info.
+    function applyBackground(mode, value, deviceName) {
+        const normalizedMode = ['BLANK', 'SOLID', 'GRADIENT', 'DEFAULT'].includes(mode) ? mode : 'DEFAULT';
+        currentBackgroundMode = normalizedMode;
+        currentDeviceName = (typeof deviceName === 'string' && deviceName.length > 0) ? deviceName : currentDeviceName;
+        switch (normalizedMode) {
+            case 'BLANK':
+                list.style.background = '';
+                removeWatermark();
+                break;
+            case 'SOLID': {
+                const css = argbLongToCss(value);
+                if (css) list.style.background = css;
+                removeWatermark();
+                break;
+            }
+            case 'GRADIENT': {
+                const grad = gradientCss(value);
+                if (grad) list.style.background = grad;
+                removeWatermark();
+                break;
+            }
+            case 'DEFAULT':
+            default:
+                list.style.background = '';
+                setWatermark(defaultWatermarkText());
+                break;
+        }
+    }
+
+    function gradientCss(name) {
+        switch (name) {
+            case 'sunset': return 'linear-gradient(135deg, #FF7043, #FF4081)';
+            case 'forest': return 'linear-gradient(135deg, #2E7D32, #81C784)';
+            case 'ocean':  return 'linear-gradient(135deg, #1565C0, #4FC3F7)';
+            default:       return null;
+        }
+    }
+
+    function setWatermark(text) {
+        removeWatermark();
+        const wm = document.createElement('div');
+        wm.className = 'chat-list-watermark';
+        wm.id = 'chat-watermark';
+        wm.textContent = text;
+        listShell.appendChild(wm);
+    }
+
+    function removeWatermark() {
+        const wm = document.getElementById('chat-watermark');
+        if (wm) wm.remove();
+    }
+
+    // Phase 3 双端对齐：跟随手机当前主题——深浅 + 主题色相（seed）。
+    // mdui 与手机端 MDC 同用 Material Color Utilities，同一 seed 产同一色相，双端观感对齐；
+    // seed 为空（手机用动态色/Material You，浏览器拿不到壁纸）时清回 mdui 默认配色，仅跟深浅。
+    let lastThemeKey = null;
+    function applyTheme(seed, dark, amoled) {
+        // AMOLED 只是深色的一个变体：浅色 + amoled 仍然是浅色。
+        const on = !!dark && amoled === true;
+        // key 必须含 amoled 位。只拼 dark|seed 的话，「只切 AMOLED」会被下面的
+        // 缓存判定当成同一主题提前 return —— 手机上点了开关，浏览器毫无反应。
+        const key = (dark ? 'd' : 'l') + (on ? 'a' : '') + '|' + (seed || '');
+        if (key === lastThemeKey) return;   // peer-info 可能多次拉取，避免反复重建调色板
+        lastThemeKey = key;
+        // 写在 mdui 短路之前：纯黑底色来自 tokens.css 的 [data-amoled="1"]，
+        // 跟 mdui 在不在无关。写在 return 之后，mdui 加载失败时页面会停在深灰。
+        document.documentElement.setAttribute('data-amoled', on ? '1' : '0');
+        if (!window.mdui) return;
+        try {
+            if (typeof mdui.setTheme === 'function') mdui.setTheme(dark ? 'dark' : 'light');
+            if (typeof mdui.setColorScheme === 'function') {
+                if (typeof seed === 'string' && /^#[0-9a-fA-F]{6}$/.test(seed)) {
+                    mdui.setColorScheme(seed);
+                } else if (typeof mdui.removeColorScheme === 'function') {
+                    mdui.removeColorScheme();
+                }
+            }
+        } catch (_) {
+            // mdui 缺失或 API 漂移时主题不致命，静默——不阻断传输。
+        }
+    }
+
+    // 气泡圆角双端联动：手机在设置里拖 slider → peer-info 推 bubbleCornerRadius(dp) →
+    // 覆写 tokens.css 的 --flikky-bubble-radius，气泡两端圆角一致。这是「一个设计决策
+    // 一处改动两端生效」的活样例。钳制到 App 侧的 8..28dp，非法/省略值回落默认 10。
+    const DEFAULT_BUBBLE_RADIUS = 10;
+    let lastBubbleRadius = null;
+    function applyBubbleRadius(dp) {
+        const n = Number(dp);
+        const clamped = Number.isFinite(n)
+            ? Math.max(8, Math.min(28, Math.round(n)))
+            : DEFAULT_BUBBLE_RADIUS;
+        if (clamped === lastBubbleRadius) return;
+        lastBubbleRadius = clamped;
+        document.documentElement.style.setProperty('--flikky-bubble-radius', clamped + 'px');
+    }
+
+    function resolvePhoneAvatarKey(data) {
+        if (Object.prototype.hasOwnProperty.call(data, 'phoneAvatarKey')) {
+            return normalizeAvatarKey(data.phoneAvatarKey, phoneAvatarKey);
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'phoneAvatarId')) {
+            const legacyId = Number(data.phoneAvatarId);
+            return Number.isInteger(legacyId) && legacyId !== 0
+                ? legacyAvatarKey(legacyId, phoneAvatarKey)
+                : phoneAvatarKey;
+        }
+        return phoneAvatarKey;
+    }
+
+    function applyPeerAppearance(data, fallbackName) {
+        if (i18n.applyServerLanguage && typeof data.languageTag === 'string') {
+            i18n.applyServerLanguage(data.languageTag);
+        }
+        const name = (data.deviceName && typeof data.deviceName === 'string') ? data.deviceName : fallbackName;
+        const prevRecall = recallEnabled;
+        const prevAllowPeerRecall = allowPeerRecall;
+        const prevAllowPeerFavorite = allowPeerFavorite;
+        if (Object.prototype.hasOwnProperty.call(data, 'recallEnabled')) {
+            recallEnabled = data.recallEnabled === true;
+            if (!recallEnabled) closeRecallMenu();
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'allowPeerRecall')) {
+            allowPeerRecall = data.allowPeerRecall === true;
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'allowPeerFavorite')) {
+            allowPeerFavorite = data.allowPeerFavorite === true;
+            if (!allowPeerFavorite) closeRecallMenu();
+        }
+        const nextStyle = Object.prototype.hasOwnProperty.call(data, 'messageActionStyle')
+            ? normalizeActionStyle(data.messageActionStyle)
+            : actionStyle;
+        if (nextStyle !== actionStyle || recallEnabled !== prevRecall || allowPeerRecall !== prevAllowPeerRecall
+            || allowPeerFavorite !== prevAllowPeerFavorite) {
+            actionStyle = nextStyle;
+            document.body.dataset.actionStyle = actionStyle;
+            refreshAllMessageActions();
+        }
+        phoneAvatarKey = resolvePhoneAvatarKey(data);
+        avatarGrouping = normalizeAvatarGrouping(data.avatarGrouping);
+        renderPeerHeader(name, phoneAvatarKey);
+        applyBackground(data.backgroundMode || 'DEFAULT', data.backgroundValue || '', name);
+        applyTheme(
+            typeof data.themeSeed === 'string' ? data.themeSeed : null,
+            !!data.themeDark,
+            data.amoled === true,
+        );
+        if (globalThis.flikkyLeading && typeof globalThis.flikkyLeading.applyVisual === 'function') {
+            globalThis.flikkyLeading.applyVisual(data.leadingVisual);
+        }
+        applyBubbleRadius(data.bubbleCornerRadius);
+        if (Object.prototype.hasOwnProperty.call(data, 'animationSpeed')) {
+            applyAnimationSpeed(data.animationSpeed);
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'sessionTimestampEnabled')) {
+            document.body.dataset.timestamps = data.sessionTimestampEnabled ? 'on' : 'off';
+        }
+        if (typeof data.appVersion === 'string' && data.appVersion) {
+            document.body.dataset.appVersion = data.appVersion;
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'favoriteEnabled')) {
+            document.body.dataset.favoriteEnabled = data.favoriteEnabled ? '1' : '0';
+            document.querySelectorAll('[data-dest="favorites"]').forEach((btn) => {
+                btn.hidden = !data.favoriteEnabled;
+            });
+            // navigate:false —— 这是兜底，不是导航。窄屏上把 mobileDest 一起改
+            // 会在 peer-info 到达的瞬间把用户从会话页甩进设置页。
+            if (!data.favoriteEnabled && shell
+                && !document.getElementById('view-favorites').hidden) {
+                selectDest(firstAvailableDest(), { navigate: false });
+            }
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'storageBrowsingEnabled')) {
+            applyStorageBrowsing(!!data.storageBrowsingEnabled);
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'albumBrowsingEnabled')) {
+            applyAlbumBrowsing(!!data.albumBrowsingEnabled);
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'showHiddenFiles')) {
+            // 列举规则变了：目录缓存里那些列表是按旧规则列出来的，不失效的话
+            // 手机上翻了开关这边毫无变化 —— 用户会以为开关坏了。
+            // 只在**真的变了**时失效：每次 settings_changed 都重取等于没有缓存。
+            const next = !!data.showHiddenFiles;
+            if (lastShowHiddenFiles !== null && lastShowHiddenFiles !== next
+                && window.flikkyPanels && window.flikkyPanels.files) {
+                window.flikkyPanels.files.invalidate();
+            }
+            lastShowHiddenFiles = next;
+        }
+        // 默认焦点只施加一次。挂在本函数上而不加这道闸，等于每次 settings_changed
+        // 都把用户拽回第一个目的地 —— 与上面那条注释记的坑同一形状。
+        applyDefaultFocusOnce();
+        reflowMessageAvatars();
+    }
+
+    // Fetch peer info and apply.
+    async function fetchPeerInfo() {
+        const revision = peerAppearanceRevision;
+        try {
+            const r = await fetch('/api/peer-info');
+            if (!r.ok) return;
+            const data = await r.json();
+            if (revision !== peerAppearanceRevision) return;
+            applyPeerAppearance(data, t('app.phone'));
+        } catch (_) {
+            // Fail silently — do not block transfers.
+        }
+    }
+
+    // ── M9b: Avatar picker ────────────────────────────────────────────────
+    function buildAvatarPickerGrid() {
+        const grid = document.getElementById('avatar-picker-grid');
+        if (!grid || grid.childElementCount > 0) return; // build once
+        const dialog = grid.parentElement;
+        if (dialog && !document.getElementById('avatar-fill-row')) {
+            const row = document.createElement('label');
+            row.id = 'avatar-fill-row';
+            row.className = 'avatar-fill-row';
+            const label = document.createElement('span');
+            label.id = 'avatar-fill-label';
+            label.textContent = t('app.filled_icons');
+            const fillSwitch = document.createElement('mdui-switch');
+            fillSwitch.id = 'avatar-fill-switch';
+            fillSwitch.checked = avatarPickerFilled;
+            fillSwitch.addEventListener('change', () => {
+                avatarPickerFilled = !!fillSwitch.checked;
+                updatePickerSelection();
+            });
+            row.appendChild(label);
+            row.appendChild(fillSwitch);
+            dialog.insertBefore(row, grid);
+        }
+        for (const key of AVATAR_PRESETS) {
+            const cell = document.createElement('mdui-avatar');
+            cell.setAttribute('role', 'button');
+            cell.setAttribute('tabindex', '0');
+            cell.dataset.avatarKey = key;
+            cell.addEventListener('click', () => selectAvatar(displayAvatarKey(key)));
+            cell.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectAvatar(displayAvatarKey(key)); }
+            });
+            grid.appendChild(cell);
+        }
+        const charCell = document.createElement('button');
+        charCell.className = 'avatar-char-cell';
+        charCell.type = 'button';
+        charCell.textContent = 'A';
+        charCell.addEventListener('click', () => {
+            const value = window.prompt(t('app.avatar_character'), 'A') || '';
+            const first = Array.from(value.trim())[0];
+            if (first) selectAvatar('char:' + first);
+        });
+        grid.appendChild(charCell);
+        updatePickerSelection();
+    }
+
+    function displayAvatarKey(key) {
+        const normalized = normalizeAvatarKey(key, AVATAR_DEFAULT_BROWSER);
+        if (!normalized.startsWith('icon:')) return normalized;
+        const spec = avatarIconSpec(normalized);
+        return 'icon:' + spec.name + ':' + (avatarPickerFilled ? 'filled' : 'outline');
+    }
+
+    function sameAvatarVisual(a, b) {
+        const left = normalizeAvatarKey(a, AVATAR_DEFAULT_BROWSER);
+        const right = normalizeAvatarKey(b, AVATAR_DEFAULT_BROWSER);
+        if (left.startsWith('char:') || right.startsWith('char:')) return left === right;
+        const l = avatarIconSpec(left);
+        const r = avatarIconSpec(right);
+        return l.name === r.name && l.filled === r.filled;
+    }
+
+    function openAvatarPicker() {
+        avatarPickerFilled = avatarIconSpec(normalizeAvatarKey(myAvatarKey, AVATAR_DEFAULT_BROWSER)).filled;
+        buildAvatarPickerGrid();
+        const fillSwitch = document.getElementById('avatar-fill-switch');
+        if (fillSwitch) fillSwitch.checked = avatarPickerFilled;
+        updatePickerSelection();
+        const picker = document.getElementById('avatar-picker');
+        if (picker) picker.open = true;   // mdui-dialog: overlay + Esc close are built in.
+    }
+
+    function closeAvatarPicker() {
+        const picker = document.getElementById('avatar-picker');
+        if (picker) picker.open = false;
+    }
+
+    function updatePickerSelection() {
+        const grid = document.getElementById('avatar-picker-grid');
+        if (!grid) return;
+        for (const cell of grid.children) {
+            if (!cell.dataset.avatarKey) continue;
+            const key = displayAvatarKey(cell.dataset.avatarKey);
+            renderAvatar(cell, key);
+            const selected = sameAvatarVisual(key, myAvatarKey);
+            cell.setAttribute('aria-selected', selected ? 'true' : 'false');
+        }
+    }
+
+    function selectAvatar(key) {
+        myAvatarKey = normalizeAvatarKey(key, AVATAR_DEFAULT_BROWSER);
+        localStorage.setItem('flikky_avatar_key', myAvatarKey);
+        localStorage.removeItem('flikky_avatar');
+        renderMyAvatarBtn();
+        refreshBrowserMessageAvatars();
+        updatePickerSelection();
+        closeAvatarPicker();
+        // Re-send client_hello so the phone updates its view of our avatar.
+        sendClientHello(true);
+    }
+
+    // ── M9b: client_hello ─────────────────────────────────────────────────
+    function sendClientHello(explicit) {
+        if (currentWs && currentWs.readyState === 1) {
+            try {
+                currentWs.send(JSON.stringify({
+                    type: 'client_hello',
+                    avatarKey: myAvatarKey,
+                    // Explicit picks win on the phone; connect announces may be pushed back.
+                    explicit: !!explicit,
+                }));
+            } catch (_) {}
+        }
+    }
+
+    // Init header avatar on load.
+    renderMyAvatarBtn();
+
+    // Attach picker open/close handlers after DOM is ready.
+    const myAvatarBtnEl = document.getElementById('my-avatar-btn');
+    if (myAvatarBtnEl) {
+        myAvatarBtnEl.addEventListener('click', openAvatarPicker);
+    }
+    // mdui-dialog handles overlay-click and Escape dismissal itself (close-on-overlay-click
+    // / close-on-esc), so no manual backdrop or keydown listeners are needed.
+
+    const seen = new Set();
+    const recalledMessageIds = new Set();
+
+    // 浏览器自己的 client id 一直随生命周期。所有出站请求带上 X-Client-Id，
+    // 服务端 broadcast 的 file_added / text_added payload 会回传 senderId，
+    // 自己发的事件 dedup 跳过避免双气泡。
+    const myClientId = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'cid-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+
+    // WS 在线状态：影响发送按钮和上传按钮是否可点。
+    let wsConnected = false;
+    function setSendEnabled(enabled) {
+        sendBtn.disabled = !enabled;
+        fileBtn.disabled = !enabled;
+        refreshSendReady();
+    }
+
+    // 单行起步，按内容长高到 CSS 的 max-height(120px) 为止；超出后自己出滚动条。
+    // 先归零再读 scrollHeight —— 不归零的话高度只会单调增长，删字不会缩回去。
+    function autoGrowInput() {
+        input.style.height = 'auto';
+        input.style.height = `${input.scrollHeight}px`;
+    }
+
+    // data-ready 只反映"有没有可发的内容"；能不能点由 setSendEnabled 的连接态决定。
+    // 断线时输入框里有字也不能显示成可发送的主色按钮，所以两个条件都要满足。
+    function refreshSendReady() {
+        const ready = !sendBtn.disabled && input.value.trim() !== '';
+        sendBtn.dataset.ready = ready ? 'true' : 'false';
+    }
+
+    function formatSize(b) {
+        if (b >= 1024 * 1024) return (b / 1048576).toFixed(1) + ' MB';
+        if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+        return b + ' B';
+    }
+    function formatRate(b) { return formatSize(b) + '/s'; }
+    function formatUptime(s) {
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        const pad = (n) => String(n).padStart(2, '0');
+        return h > 0 ? `${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+    }
+
+    function mediaKind(mime) {
+        const m = String(mime || '').split(';', 1)[0].trim().toLowerCase();
+        if (['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(m)) return 'image';
+        if (['video/mp4', 'video/webm', 'video/3gpp', 'video/quicktime', 'video/x-matroska'].includes(m)) {
+            return 'video';
+        }
+        return null;
+    }
+
+    // 操作集唯一事实源（§12.2，纯函数）：浮条/常驻行/右键菜单/长按菜单四个入口共用。
+    // 只依赖 classList.contains 与 dataset，vm 测试用 stub 气泡即可跑。
+    function buildMessageActions(bubble, recallOn, allowPeerRecallOn = false, allowPeerFavoriteOn = false,
+        favorited = new Set()) {
+        const kind = bubble.dataset.kind;
+        const mine = bubble.classList.contains('me');
+        const failed = bubble.classList.contains('failed');
+        const uploading = bubble.classList.contains('uploading');
+        const transferring = bubble.classList.contains('transferring');
+        // 状态门槛：下载/预览/收藏仅 COMPLETED（IN_PROGRESS 下载路由返 409）。
+        const completed = kind === 'file' && !!bubble.dataset.fileId && !failed && !uploading && !transferring;
+        const actions = [];
+        if (kind === 'text') {
+            actions.push({ kind: 'copy', icon: 'content_copy', labelKey: 'app.copy' });
+        } else if (kind === 'file') {
+            if (completed) {
+                if (mediaKind(bubble.dataset.mime)) {
+                    actions.push({ kind: 'preview', icon: 'visibility', labelKey: 'app.preview' });
+                }
+                actions.push({ kind: 'download', icon: 'download', labelKey: 'app.download' });
+            }
+        }
+        // D78：两个方向的消息都能收藏到手机；要有 server-side id，文件要已完成。
+        if (allowPeerFavoriteOn && bubble.dataset.messageId && (kind === 'text' || completed)) {
+            const isFavorited = favorited.has(String(bubble.dataset.messageId));
+            actions.push({
+                kind: 'favorite',
+                icon: 'star',
+                filled: isFavorited,
+                labelKey: isFavorited ? 'app.favorited' : 'app.favorite',
+            });
+        }
+        // 撤回不受状态限制，但要有 server-side id（上传完成前没有）。
+        if ((mine || allowPeerRecallOn) && recallOn && bubble.dataset.messageId) {
+            actions.push({ kind: 'recall', icon: 'undo', labelKey: 'app.recall', danger: true });
+        }
+        return actions;
+    }
+
+    function executeMessageAction(action, bubble) {
+        if (action.kind === 'copy') { copyBubbleText(bubble); return; }
+        if (action.kind === 'preview') {
+            openSessionLightbox(bubble.dataset.fileId, mediaKind(bubble.dataset.mime));
+            return;
+        }
+        if (action.kind === 'download') { triggerDownload(bubble.dataset.fileId, bubble.dataset.name || ''); return; }
+        if (action.kind === 'favorite') { favoriteMessage(bubble.dataset.messageId); return; }
+        if (action.kind === 'recall') { confirmRecallMessage(bubble.dataset.messageId); }
+    }
+
+    function openSessionLightbox(fileId, kind) {
+        openLightbox({
+            kind,
+            fullUrl: `/api/files/${fileId}?inline=1`,
+            thumbnailUrl: `/api/files/${fileId}/thumb`,
+        });
+    }
+
+    function triggerDownload(fileId, name) {
+        if (!fileId) return;
+        const link = document.createElement('a');
+        link.href = `/api/files/${fileId}`;
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    }
+
+    function collectReceivedCompletedFiles() {
+        return Array.from(list.querySelectorAll('.file-bubble.them'))
+            .filter((bubble) => bubble.dataset.fileId
+                && !bubble.classList.contains('failed')
+                && !bubble.classList.contains('uploading')
+                && !bubble.classList.contains('transferring'))
+            .map((bubble) => ({
+                fileId: bubble.dataset.fileId,
+                name: bubble.dataset.name || '',
+            }));
+    }
+
+    function refreshSaveAllFab() {
+        const state = computeSaveAllState(collectReceivedCompletedFiles());
+        saveAllFab.hidden = !state.visible;
+        // FAB 消失时菜单必须一起收起，否则会留下一个悬空的菜单。
+        if (!state.visible) closeSaveAllMenu();
+        saveAllEachLabel.textContent = t('app.save_all_each', { count: state.fileCount });
+    }
+
+    async function saveAllIndividually() {
+        const files = collectReceivedCompletedFiles();
+        for (const file of files) {
+            triggerDownload(file.fileId, file.name);
+            await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+        refreshSaveAllFab();
+    }
+
+    function saveAllAsZip() {
+        const link = document.createElement('a');
+        link.href = '/api/files/archive';
+        link.download = '';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    }
+
+    function closeSaveAllMenu(options) {
+        // 只有当焦点还在菜单里时才收回 FAB —— 点外部关闭时用户的焦点已经在别处，别抢。
+        const restore = (options && options.restoreFocus)
+            || saveAllDropdown.contains(document.activeElement);
+        saveAllDropdown.hidden = true;
+        saveAllFab.setAttribute('aria-expanded', 'false');
+        if (restore && !saveAllFab.hidden) saveAllFab.focus();
+    }
+
+    function toggleSaveAllMenu() {
+        const open = saveAllDropdown.hidden;
+        saveAllDropdown.hidden = !open;
+        saveAllFab.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    async function copyBubbleText(bubble) {
+        const text = bubble.textContent || '';
+        let ok = false;
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                ok = true;
+            }
+        } catch (_) { /* 走下面的兜底 */ }
+        if (!ok) {
+            // 明文 HTTP 模式没有 clipboard API —— execCommand 兜底（§12.2 降级链）。
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+            textarea.remove();
+        }
+        if (ok) window.flikky.showInfo(t('app.copied'));
+        else window.flikky.showError(t('app.copy_failed'));
+    }
+
+    // 把操作条渲染进 bubble-row（一份 DOM，FLOATING/INLINE 两种呈现全由 CSS 决定）。
+    function renderMessageActionBar(row, bubble) {
+        if (!row) return;
+        const old = row.querySelector('.msg-actions');
+        if (old) old.remove();
+        const actions = buildMessageActions(bubble, recallEnabled, allowPeerRecall, allowPeerFavorite, favoritedIds);
+        if (!actions.length) return;
+        const bar = document.createElement('div');
+        bar.className = 'msg-actions';
+        for (const action of actions) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            if (action.danger) button.classList.add('danger');
+            const label = t(action.labelKey);
+            button.setAttribute('title', label);
+            button.setAttribute('aria-label', label);
+            button.appendChild(materialSymbolEl(action.icon, !!action.filled));
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                executeMessageAction(action, bubble);
+            });
+            bar.appendChild(button);
+        }
+        row.appendChild(bar);
+    }
+
+    function refreshAllMessageActions() {
+        for (const row of list.querySelectorAll('.bubble-row')) {
+            const bubble = row.querySelector('.bubble, .file-bubble');
+            if (bubble) renderMessageActionBar(row, bubble);
+        }
+    }
+
+    function buildClassicFileContent(bubble, fileId, name, sizeBytes) {
+        bubble.classList.remove('media');
+        while (bubble.firstChild) bubble.removeChild(bubble.firstChild);
+        const a = document.createElement('a');
+        if (fileId) { a.href = `/api/files/${fileId}`; a.download = name; }
+        a.textContent = name;
+        const size = document.createElement('span');
+        size.className = 'size';
+        size.textContent = formatSize(sizeBytes);
+        // 文件图标：与 App 文件气泡/文件总览共用分类与全局 leading 形状。
+        const iconWrap = document.createElement('span');
+        iconWrap.className = 'file-icon';
+        iconWrap.dataset.leadingType = globalThis.flikkyLeading &&
+            typeof globalThis.flikkyLeading.typeOf === 'function'
+            ? globalThis.flikkyLeading.typeOf(bubble.dataset.mime).id
+            : 'other';
+        iconWrap.appendChild(materialSymbolEl(fileSymbolName(bubble.dataset.mime), false));
+        bubble.appendChild(iconWrap);
+        bubble.appendChild(a);
+        bubble.appendChild(size);
+    }
+
+    function applyMediaBubble(bubble, fileId, name, sizeBytes, kind) {
+        while (bubble.firstChild) bubble.removeChild(bubble.firstChild);
+        bubble.classList.add('media');
+        const wrap = document.createElement('div');
+        wrap.className = 'thumb-wrap';
+        const img = document.createElement('img');
+        img.className = 'thumb';
+        img.src = `/api/files/${fileId}/thumb`;
+        img.alt = name;
+        img.loading = 'lazy';
+        img.addEventListener('error', () => {
+            buildClassicFileContent(bubble, fileId, name, sizeBytes);
+        });
+        wrap.appendChild(img);
+        if (kind === 'video') {
+            const badge = materialSymbolEl('play_circle', true);
+            badge.classList.add('thumb-play');
+            wrap.appendChild(badge);
+        }
+        wrap.addEventListener('click', () => {
+            if (bubble.classList.contains('failed')) return;
+            openSessionLightbox(fileId, kind);
+        });
+        bubble.appendChild(wrap);
+
+        const caption = document.createElement('div');
+        caption.className = 'thumb-caption';
+        const a = document.createElement('a');
+        a.href = `/api/files/${fileId}`;
+        a.download = name;
+        a.textContent = name;
+        const size = document.createElement('span');
+        size.className = 'size';
+        size.textContent = formatSize(sizeBytes);
+        caption.appendChild(a);
+        caption.appendChild(size);
+        bubble.appendChild(caption);
+    }
+
+    function renderText(msg, mine) {
+        maybeInsertTimeDivider(msg.timestamp);
+        const div = document.createElement('div');
+        div.className = 'bubble ' + (mine ? 'me' : 'them');
+        div.textContent = msg.content;
+        div.dataset.messageId = msg.id;
+        div.dataset.kind = 'text';
+        appendBubbleRow(div, mine ? 'BROWSER' : 'PHONE');
+        attachBubbleGestureHandlers(div);
+        return div;
+    }
+
+    function renderFile(msg, mine) {
+        maybeInsertTimeDivider(msg.timestamp);
+        const div = document.createElement('div');
+        div.className = 'file-bubble ' + (mine ? 'me' : 'them');
+        div.dataset.messageId = msg.id;
+        div.dataset.kind = 'file';
+        div.dataset.mime = msg.mime || '';
+        if (msg.fileId) div.dataset.fileId = msg.fileId;
+        div.dataset.name = msg.name || '';
+        const kind = mediaKind(msg.mime);
+        const completed = msg.status == null || msg.status === 'COMPLETED';
+        if (kind && completed) {
+            applyMediaBubble(div, msg.fileId, msg.name, msg.sizeBytes, kind);
+        } else {
+            buildClassicFileContent(div, msg.fileId, msg.name, msg.sizeBytes);
+        }
+        appendBubbleRow(div, mine ? 'BROWSER' : 'PHONE');
+        attachBubbleGestureHandlers(div);
+        if (!completed) markBubbleFailedNoRetry(div, 'app.transfer_failed');
+        return div;
+    }
+
+    // §12.3 手势通道（仅 FLOATING 模式）：桌面右键 / 触屏长按 → 完整操作菜单。
+    // INLINE 模式按钮常驻，手势全部不启用（§12.4）。挂到所有气泡（含对方的——文本有复制）。
+    function attachBubbleGestureHandlers(bubble) {
+        if (bubble.dataset.gestures === '1') return;
+        bubble.dataset.gestures = '1';
+        let longPressTimer = null;
+        let pressX = 0, pressY = 0;
+        const cancel = () => {
+            if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+        };
+        bubble.addEventListener('contextmenu', (event) => {
+            if (actionStyle === 'INLINE') return;
+            if (!buildMessageActions(bubble, recallEnabled, allowPeerRecall, allowPeerFavorite, favoritedIds).length) return;
+            cancel();
+            event.preventDefault();
+            showActionsMenu(bubble, event.clientX, event.clientY);
+        });
+        bubble.addEventListener('pointerdown', (event) => {
+            if (actionStyle === 'INLINE') return;
+            if (event.pointerType === 'mouse') return;
+            pressX = event.clientX;
+            pressY = event.clientY;
+            if (longPressTimer) clearTimeout(longPressTimer);
+            longPressTimer = setTimeout(() => {
+                longPressTimer = null;
+                showActionsMenu(bubble, event.clientX, event.clientY);
+            }, 500);
+        });
+        bubble.addEventListener('pointerup', cancel);
+        bubble.addEventListener('pointerleave', cancel);
+        bubble.addEventListener('pointercancel', cancel);
+        bubble.addEventListener('pointermove', (event) => {
+            // 拖动超过 10px 视为非长按。
+            if (Math.abs(event.clientX - pressX) > 10 || Math.abs(event.clientY - pressY) > 10) cancel();
+        });
+        // §12.2 顺手修：经典文件泡整泡可点=下载（媒体泡缩略图=lightbox、失败泡=重试、
+        // 上传中无入口；点在原生 <a> 或操作按钮上让它们自己处理）。类型在点击时判定，
+        // 因为 uploading→completed 会原地翻转气泡形态。
+        bubble.addEventListener('click', (event) => {
+            if (bubble.dataset.kind !== 'file') return;
+            if (bubble.classList.contains('failed')) return;
+            if (bubble.classList.contains('media')) return;
+            if (bubble.classList.contains('uploading')) return;
+            if (bubble.classList.contains('transferring')) return;
+            if (event.target.closest('a')) return;
+            if (event.target.closest('.msg-actions')) return;
+            if (!bubble.dataset.fileId) return;
+            triggerDownload(bubble.dataset.fileId, bubble.dataset.name || '');
+        });
+    }
+
+    // §12.3 操作菜单：右键/长按弹出，内容与浮条/常驻行同源（buildMessageActions）。
+    // 外层仍是 fixed 定位手写容器（mdui-dropdown 不支持任意屏幕坐标），内部官方 mdui-menu。
+    function showActionsMenu(bubble, x, y) {
+        closeRecallMenu();
+        const actions = buildMessageActions(bubble, recallEnabled, allowPeerRecall, allowPeerFavorite, favoritedIds);
+        if (!actions.length) return;
+        const menu = document.createElement('div');
+        menu.className = 'recall-menu';
+        menu.id = 'recall-menu';
+        menu.style.left = Math.min(x, window.innerWidth - 140) + 'px';
+        menu.style.top = Math.min(y, window.innerHeight - 48 * actions.length - 16) + 'px';
+        const mduiMenu = document.createElement('mdui-menu');
+        for (const action of actions) {
+            const item = document.createElement('mdui-menu-item');
+            item.appendChild(materialSymbolEl(action.icon, !!action.filled, 'icon'));
+            item.appendChild(document.createTextNode(t(action.labelKey)));
+            item.addEventListener('click', (event) => {
+                event.stopPropagation();
+                closeRecallMenu();
+                executeMessageAction(action, bubble);
+            });
+            mduiMenu.appendChild(item);
+        }
+        menu.appendChild(mduiMenu);
+        document.body.appendChild(menu);
+        // 下一帧再装外部点击关闭，避免本次 pointerdown / click 立刻关掉自己。
+        setTimeout(() => {
+            document.addEventListener('pointerdown', dismissRecallMenu, { capture: true });
+        }, 0);
+    }
+
+    function dismissRecallMenu(e) {
+        const menu = document.getElementById('recall-menu');
+        if (menu && !menu.contains(e.target)) closeRecallMenu();
+    }
+
+    function closeRecallMenu() {
+        document.removeEventListener('pointerdown', dismissRecallMenu, { capture: true });
+        const m = document.getElementById('recall-menu');
+        if (m) m.remove();
+    }
+
+    /**
+     * v1.3 D26 修订：撤回前必须二次确认（与手机端 AlertDialog 对齐）。
+     * 用 mdui-dialog 弹一个简单的确认窗。点击"撤回"才真正调 DELETE。
+     */
+    function confirmRecallMessage(messageId) {
+        if (!recallEnabled) return;
+        const dialog = document.getElementById('recall-confirm-dialog');
+        if (!dialog) {
+            // 回退：mdui 没加载，直接走 native confirm。
+            if (window.confirm(`${t('app.recall_title')} ${t('app.recall_body')}`)) {
+                doRecallMessage(messageId);
+            }
+            return;
+        }
+        const okBtn = dialog.querySelector('[data-action="confirm"]');
+        const cancelBtn = dialog.querySelector('[data-action="cancel"]');
+        const onOk = () => { cleanup(); doRecallMessage(messageId); };
+        const onCancel = () => { cleanup(); };
+        function cleanup() {
+            dialog.open = false;
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
+        }
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+        dialog.open = true;
+    }
+
+    // 整体替换，不是增量：推送与历史接口给的都是完整集合。
+    function setFavoritedIds(ids) {
+        favoritedIds = new Set((Array.isArray(ids) ? ids : []).map(String));
+        refreshAllMessageActions();
+    }
+
+    // D78：收藏到手机。只能加不能删；重复收藏服务端去重，回 exists。
+    async function favoriteMessage(messageId) {
+        if (!allowPeerFavorite || !messageId) return;
+        const notify = (kind, key) => {
+            if (window.flikky && window.flikky[kind]) window.flikky[kind](t(key));
+        };
+        // 实心星：浏览器取消不了，告诉用户去手机上取消，不再发请求。
+        if (favoritedIds.has(String(messageId))) {
+            notify('showInfo', 'app.favorite_exists');
+            return;
+        }
+        try {
+            const r = await fetch(`/api/messages/${messageId}/favorite`, {
+                method: 'POST',
+                headers: { 'X-Client-Id': myClientId },
+            });
+            if (r.ok) {
+                let body = null;
+                try { body = await r.json(); } catch (_) {}
+                if (body && body.result === 'exists') {
+                    notify('showInfo', 'app.favorite_exists');
+                    return;
+                }
+                notify('showInfo', 'app.favorite_added');
+                // 推送随后也会到；先本地点亮，星标不用等一个来回。
+                setFavoritedIds([...favoritedIds, String(messageId)]);
+                favoritesRev += 1;
+                document.body.dataset.favoritesRev = String(favoritesRev);
+            } else if (r.status === 403) {
+                notify('showError', 'app.favorite_not_enabled');
+            } else {
+                notify('showError', 'app.favorite_failed');
+            }
+        } catch (_) {
+            notify('showError', 'app.favorite_network_failed');
+        }
+    }
+
+    async function doRecallMessage(messageId) {
+        if (!recallEnabled) return;
+        try {
+            const r = await fetch(`/api/messages/${messageId}`, {
+                method: 'DELETE',
+                headers: { 'X-Client-Id': myClientId },
+            });
+            if (r.ok || r.status === 404) {
+                // 200 刚撤；404 已删（idempotent）。本地节点直接消失 + snackbar 提示。
+                removeMessageNode(messageId);
+                if (window.flikky && window.flikky.showInfo) {
+                    window.flikky.showInfo(t('app.message_recalled'));
+                }
+            } else if (r.status === 403) {
+                let error = null;
+                try { error = await r.json(); } catch (_) {}
+                const message = error && error.error === 'recall_disabled'
+                    ? t('app.recall_not_enabled')
+                    : t('app.recall_own_only');
+                if (window.flikky && window.flikky.showError) window.flikky.showError(message);
+            } else {
+                if (window.flikky && window.flikky.showError) {
+                    window.flikky.showError(t('app.recall_failed'));
+                }
+            }
+        } catch (_) {
+            if (window.flikky && window.flikky.showError) {
+                window.flikky.showError(t('app.recall_network_failed'));
+            }
+        }
+    }
+
+    // v1.3 D26 修订：撤回 = 消息节点完全消失（不留占位符）。被两条路径调用：
+    //  - 本浏览器调 DELETE 成功 → 移除节点 + showInfo "消息已撤回"
+    //  - 收到 message_recalled WS event（对端撤回）→ 移除节点 + showInfo "对方撤回了一条消息"
+    // 调用方负责 snackbar 文案；本函数只管 DOM 清理，且幂等。
+    // M9b: bubble is now inside a .bubble-row → remove the row (parent) to
+    // leave no ghost spacers. Falls back to removing the node itself if it is
+    // a direct list child (future-proofing).
+    function removeMessageNode(messageId) {
+        recalledMessageIds.add(String(messageId));
+        const node = list.querySelector(`[data-message-id="${messageId}"]`);
+        if (!node) return;
+        const row = node.closest('.bubble-row');
+        if (row && row.parentNode === list) {
+            row.remove();
+        } else {
+            node.remove();
+        }
+        reflowMessageAvatars();
+        refreshSaveAllFab();
+    }
+
+    function renderTransferringBubble(msg) {
+        maybeInsertTimeDivider(msg.timestamp);
+        const mine = msg.origin === 'BROWSER';
+        const div = document.createElement('div');
+        div.className = 'file-bubble ' + (mine ? 'me' : 'them') + ' transferring';
+        div.dataset.messageId = msg.id;
+        div.dataset.kind = 'file';
+        div.dataset.mime = msg.mime || '';
+        if (msg.fileId) div.dataset.fileId = msg.fileId;
+        div.dataset.name = msg.name || '';
+
+        const a = document.createElement('a');
+        a.textContent = msg.name;
+        a.setAttribute('aria-disabled', 'true');
+
+        const size = document.createElement('span');
+        size.className = 'size';
+        size.textContent = formatSize(msg.sizeBytes);
+
+        const bar = document.createElement('div');
+        bar.className = 'progress-bar';
+        const fill = document.createElement('div');
+        fill.className = 'progress-fill';
+        bar.appendChild(fill);
+
+        const pct = document.createElement('span');
+        pct.className = 'progress-pct';
+        pct.textContent = '0%';
+
+        div.appendChild(materialSymbolEl(fileSymbolName(msg.mime), false));
+        div.appendChild(a);
+        div.appendChild(size);
+        div.appendChild(bar);
+        div.appendChild(pct);
+
+        appendBubbleRow(div, mine ? 'BROWSER' : 'PHONE');
+        attachBubbleGestureHandlers(div);
+        return div;
+    }
+
+    function renderUploadingBubble(opts) {
+        maybeInsertTimeDivider(Date.now());
+        const div = document.createElement('div');
+        div.className = 'file-bubble me uploading';
+        div.dataset.localId = opts.localId;
+        div.dataset.mime = opts.mime || '';
+
+        const a = document.createElement('a');
+        a.textContent = opts.name;
+        a.setAttribute('aria-disabled', 'true');
+
+        const size = document.createElement('span');
+        size.className = 'size';
+        size.textContent = formatSize(opts.total);
+
+        const bar = document.createElement('div');
+        bar.className = 'progress-bar';
+        const fill = document.createElement('div');
+        fill.className = 'progress-fill';
+        bar.appendChild(fill);
+
+        const pct = document.createElement('span');
+        pct.className = 'progress-pct';
+        pct.textContent = '0%';
+
+        div.appendChild(materialSymbolEl(fileSymbolName(opts.mime), false));
+        div.appendChild(a);
+        div.appendChild(size);
+        div.appendChild(bar);
+        div.appendChild(pct);
+
+        appendBubbleRow(div, 'BROWSER');
+        return div;
+    }
+
+    function updateBubbleProgress(bubble, loaded, total) {
+        if (!total || total <= 0) return;
+        const ratio = Math.min(1, loaded / total);
+        const fill = bubble.querySelector('.progress-fill');
+        const pct = bubble.querySelector('.progress-pct');
+        if (fill) fill.style.width = (ratio * 100).toFixed(1) + '%';
+        if (pct) pct.textContent = Math.floor(ratio * 100) + '%';
+    }
+
+    function markBubbleCompleted(bubble, dto) {
+        bubble.dataset.fileId = dto.fileId;
+        // v1.3 修订：上传完成后设 data-message-id 并绑长按撤回。
+        // renderUploadingBubble 时没有 server-side id（还没上传），完成后 dto
+        // 带了 id。没有 data-message-id 的节点 removeMessageNode 找不到它。
+        if (dto.id != null) {
+            bubble.dataset.messageId = dto.id;
+            bubble.dataset.kind = 'file';
+            attachBubbleGestureHandlers(bubble);
+        }
+        bubble.classList.remove('uploading', 'transferring');
+
+        // 完成态统一整体重建（媒体缩略图 / 经典行），两条路径都保证带分类图标——
+        // 旧版非媒体只打补丁，transferring/uploading 骨架里缺的图标永远补不上。
+        const kind = mediaKind(bubble.dataset.mime);
+        if (kind) {
+            applyMediaBubble(bubble, dto.fileId, dto.name, dto.sizeBytes, kind);
+        } else {
+            buildClassicFileContent(bubble, dto.fileId, dto.name, dto.sizeBytes);
+        }
+        bubble.dataset.name = dto.name;
+        renderMessageActionBar(bubble.closest('.bubble-row'), bubble);
+        refreshSaveAllFab();
+    }
+
+    function markBubbleFailed(bubble, file, status) {
+        // 幂等：XHR 的 onerror / upload.onerror / upload.onabort / ontimeout 在
+        // 网络异常时可能连续触发，旧版会重复添加 retry-hint 显示两行"上传失败"。
+        if (bubble.classList.contains('failed')) return;
+        bubble.classList.remove('uploading');
+        bubble.classList.add('failed');
+
+        const bar = bubble.querySelector('.progress-bar');
+        if (bar) bar.remove();
+        const pct = bubble.querySelector('.progress-pct');
+        if (pct) pct.remove();
+
+        // 失败提示：整个气泡可点击重试，不用下划线超链接。
+        const hint = document.createElement('span');
+        hint.className = 'retry-hint';
+        hint.dataset.flikkyI18n = 'app.upload_failed_retry';
+        hint.textContent = t('app.upload_failed_retry');
+        bubble.appendChild(hint);
+        bubble.style.cursor = 'pointer';
+        bubble.dataset.flikkyI18nTitle = 'app.retry';
+        bubble.title = t('app.retry');
+        bubble.addEventListener('click', function retryHandler() {
+            bubble.removeEventListener('click', retryHandler);
+            // M9b: bubble is inside a .bubble-row — remove the whole row.
+            const row = bubble.closest('.bubble-row');
+            if (row && row.parentNode === list) {
+                row.remove();
+            } else {
+                bubble.remove();
+            }
+            reflowMessageAvatars();
+            sendFile(file);
+        });
+
+        if (window.flikky && window.flikky.showError) {
+            const suffix = status ? ` (${status})` : '';
+            window.flikky.showError(t('app.upload_failed_file', {
+                file: file.name,
+                suffix,
+            }));
+        }
+        renderMessageActionBar(bubble.closest('.bubble-row'), bubble);
+    }
+
+    function markBubbleFailedNoRetry(bubble, key) {
+        if (!bubble) return;
+        bubble.classList.remove('uploading', 'transferring');
+        bubble.classList.add('failed');
+        const bar = bubble.querySelector('.progress-bar');
+        if (bar) bar.remove();
+        const pct = bubble.querySelector('.progress-pct');
+        if (pct) pct.remove();
+        const hint = bubble.querySelector('.retry-hint');
+        if (hint) hint.remove();
+        const failHint = document.createElement('span');
+        failHint.className = 'retry-hint';
+        failHint.dataset.flikkyI18n = key;
+        failHint.textContent = t(key);
+        bubble.appendChild(failHint);
+        bubble.style.cursor = 'default';
+    }
+
+    function onWsEvent(ev) {
+        // v1.3 应用层 pong：服务端 echo {"type":"pong","id":N}，无 payload 包裹。
+        if (ev.type === 'pong') {
+            handlePong(ev.id);
+            return;
+        }
+        // 服务端主动停止 — 抢在 ws.onclose 之前标记，让重连流程跳过这个 WS。
+        if (ev.type === 'server_stopped') {
+            serverStopped = true;
+            setWebConnectionActive(false);
+            stopHeartbeat();
+            setConnectionWatermarkState('disconnected');
+            showConnectionDialog('terminated', 'app.service_stopped');
+            setSendEnabled(false);
+            return;
+        }
+        const payloadId = ev.payload && ev.payload.id;
+        const key = `${ev.type}:${payloadId}`;
+        if (payloadId != null && seen.has(key)) return;
+        // 自己发的广播跳过——已经在 XHR/fetch onload 时本地渲染过。
+        if (ev.payload && ev.payload.senderId && ev.payload.senderId === myClientId) {
+            seen.add(key);
+            return;
+        }
+        if (ev.type === 'favorites_state') {
+            setFavoritedIds(ev.payload && ev.payload.messageIds);
+            return;
+        }
+        if (ev.type === 'message_recalled') {
+            // v1.3 D26 修订：服务端广播。本端 DELETE 成功路径已经自己 remove 节点了，
+            // 这里覆盖"对端撤回"分支。removeMessageNode 幂等。
+            // 文案区分：本端是"消息已撤回"（doRecallMessage 里发），对端是
+            // "对方撤回了一条消息"。判断：如果该 messageId 节点还在，说明本端
+            // 没主动撤过 → 是对端撤回。
+            const p = ev.payload || {};
+            if (typeof p.messageId === 'number') {
+                const stillThere = list.querySelector(`[data-message-id="${p.messageId}"]`);
+                removeMessageNode(p.messageId);
+                if (stillThere && window.flikky && window.flikky.showInfo) {
+                    window.flikky.showInfo(t('app.peer_recalled'));
+                }
+            }
+            refreshSaveAllFab();
+            return;
+        }
+        if (ev.type === 'text_added') {
+            seen.add(key);
+            renderText(ev.payload, ev.payload.origin === 'BROWSER');
+        } else if (ev.type === 'file_added') {
+            const fileId = ev.payload && ev.payload.fileId;
+            if (fileId && list.querySelector(`[data-file-id="${fileId}"]`)) {
+                seen.add(key);
+                return;
+            }
+            seen.add(key);
+            if (ev.payload.status === 'IN_PROGRESS') {
+                renderTransferringBubble(ev.payload);
+            } else {
+                renderFile(ev.payload, ev.payload.origin === 'BROWSER');
+            }
+            refreshSaveAllFab();
+        } else if (ev.type === 'file_progress') {
+            const p = ev.payload;
+            if (p && typeof p.messageId === 'number') {
+                const bubble = list.querySelector(`[data-message-id="${p.messageId}"]`);
+                if (bubble) updateBubbleProgress(bubble, p.bytesTransferred, p.totalBytes);
+            }
+        } else if (ev.type === 'file_ready') {
+            const p = ev.payload;
+            if (p && typeof p.messageId === 'number') {
+                const bubble = list.querySelector(`[data-message-id="${p.messageId}"]`);
+                if (bubble) {
+                    markBubbleCompleted(bubble, p);
+                }
+            }
+        } else if (ev.type === 'file_removed') {
+            const p = ev.payload;
+            if (p && typeof p.messageId === 'number') {
+                const bubble = list.querySelector(`[data-message-id="${p.messageId}"]`);
+                if (bubble) {
+                    markBubbleFailedNoRetry(bubble, 'app.transfer_failed');
+                    refreshSaveAllFab();
+                }
+            }
+        } else if (ev.type === 'status') {
+            lastStatus = ev.payload;
+            renderStatus();
+        } else if (ev.type === 'peer_avatar_changed') {
+            if (ev.payload && typeof ev.payload.avatarKey === 'string') {
+                myAvatarKey = normalizeAvatarKey(ev.payload.avatarKey, AVATAR_DEFAULT_BROWSER);
+                localStorage.setItem('flikky_avatar_key', myAvatarKey);
+                localStorage.removeItem('flikky_avatar');
+                renderMyAvatarBtn();
+                refreshBrowserMessageAvatars();
+                updatePickerSelection();
+            }
+        } else if (ev.type === 'settings_changed') {
+            peerAppearanceRevision++;
+            applyPeerAppearance(ev.payload || {}, t('app.phone'));
+            if (!ev.payload?.languageTag && i18n.refresh) i18n.refresh();
+        }
+    }
+
+    function reconcileHistorySnapshot(data, knownIds) {
+        const messages = Array.isArray(data.ordered) && data.ordered.length ? data.ordered : [
+            ...(data.texts || []).map(m => ({ ...m, kind: 'text' })),
+            ...(data.files || []).map(m => ({ ...m, kind: 'file' })),
+        ];
+        const present = new Set(messages.map(m => String(m.id)));
+        // Only remove nodes already present when the request began. A newer live
+        // delivery can legitimately be absent from this HTTP snapshot.
+        knownIds.forEach(id => { if (!present.has(id)) removeMessageNode(id); });
+        messages.forEach(m => {
+            if (m.kind !== 'file' || recalledMessageIds.has(String(m.id))) return;
+            const bubble = list.querySelector(`[data-message-id="${m.id}"]`);
+            if (!bubble || !bubble.classList.contains('transferring')) return;
+            if (m.status === 'COMPLETED') markBubbleCompleted(bubble, m);
+            else if (m.status === 'FAILED' || m.status === 'DELETED') {
+                markBubbleFailedNoRetry(bubble, 'app.transfer_failed');
+            }
+        });
+    }
+
+    async function loadHistory() {
+        const connection = currentWs;
+        const knownIds = Array.from(list.querySelectorAll('[data-message-id]'), node => String(node.dataset.messageId));
+        lastBubbleOrigin = null;
+        const r = await fetch('/api/messages');
+        if (!r.ok) return;
+        const data = await r.json();
+        if (connection !== currentWs || serverStopped) return;
+        reconcileHistorySnapshot(data, knownIds);
+        if (Array.isArray(data.favoritedIds)) setFavoritedIds(data.favoritedIds);
+        // 服务端 v1.2 起新增 `ordered`（按 timestamp 升序的混合列表）。优先用它，
+        // 否则回退到 texts+files 各自顺序——但回退路径会丢失跨 kind 的时间顺序，
+        // 仅做兼容。两条回放分支全程同步（无 await），finally 确保提前 return 或抛出
+        // 都不会让标记卡在 true 上。
+        replayingHistory = true;
+        try {
+            if (Array.isArray(data.ordered) && data.ordered.length) {
+                for (const m of data.ordered) {
+                    if (recalledMessageIds.has(String(m.id))) continue;
+                    if (m.kind === 'text') {
+                        const key = `text_added:${m.id}`;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        renderText(m, m.origin === 'BROWSER');
+                    } else if (m.kind === 'file') {
+                        const key = `file_added:${m.id}`;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        if (m.status === 'IN_PROGRESS') {
+                            renderTransferringBubble(m);
+                        } else {
+                            const bubble = renderFile(m, m.origin === 'BROWSER');
+                            if (bubble) bubble.dataset.fileId = m.fileId;
+                        }
+                    }
+                }
+                refreshSaveAllFab();
+                return;
+            }
+            for (const t of data.texts || []) {
+                if (recalledMessageIds.has(String(t.id))) continue;
+                const key = `text_added:${t.id}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                renderText(t, t.origin === 'BROWSER');
+            }
+            for (const f of data.files || []) {
+                if (recalledMessageIds.has(String(f.id))) continue;
+                const key = `file_added:${f.id}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                const bubble = renderFile(f, f.origin === 'BROWSER');
+                if (bubble) bubble.dataset.fileId = f.fileId;
+            }
+            refreshSaveAllFab();
+        } finally {
+            replayingHistory = false;
+        }
+    }
+
+    let currentConnKey = 'app.connecting';
+    function setConn(key) {
+        currentConnKey = key;
+        conn.textContent = t(key);
+    }
+
+    function renderStatus() {
+        if (!lastStatus) return;
+        uptimeEl.textContent = formatUptime(lastStatus.uptime || 0);
+        countEl.textContent = countText('app.files', Number(lastStatus.fileCount) || 0);
+        rateEl.textContent = formatRate(lastStatus.bytesPerSecond || 0);
+    }
+
+    const connectionDialog = document.getElementById('connection-dialog');
+    const connectionDialogMessage = document.getElementById('connection-dialog-message');
+    let connectionDialogState = null;
+    function showConnectionDialog(kind, key, values) {
+        if (!connectionDialog || !connectionDialogMessage) return;
+        connectionDialogState = { kind, key, values };
+        connectionDialog.dataset.kind = kind;
+        connectionDialogMessage.textContent = t(key, values);
+        connectionDialog.open = true;
+    }
+    function hideConnectionDialog() {
+        if (!connectionDialog) return;
+        connectionDialogState = null;
+        connectionDialog.open = false;
+    }
+
+    // WS 重入保护：openWs 在已 connecting/connected 时不再开新连接。
+    // 防止 onclose → setTimeout 与外部 retry 的多个时间线让多个 WebSocket 并存
+    // → 每个广播帧被多次 dispatch → 多个相同消息泡。
+    let currentWs = null;
+    let reconnectTimer = null;
+    let hadConnected = false;
+    // 服务端发了 server_stopped event 表示是用户主动停止（而非网络断开）。
+    // 这种情况下浏览器不该尝试重连 —— 下次启动的服务是新会话，新 PIN，
+    // 旧 URL 反正连不上。区分这两种语义是 user 在 test3 之后的核心反馈。
+    let serverStopped = false;
+    let activeUploads = [];
+    // 重连尝试上限。万一 server_stopped event 由于 race 没及时到达浏览器，
+    // 这一层兜底确保不会无限重连；每次握手也有 5 秒上限。
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 6;
+
+    // v1.3 B5 应用层 ping/pong：替换 v1.2 的"4 秒 frame 超时被动 close"。
+    // v1.2 依赖服务端 1Hz status 广播作为心跳——但那是隐式约定，业务流量频率变了
+    // 就会误判。改为浏览器主动发 ping，服务端回 pong：语义明确、不依赖业务流量。
+    //
+    // 触发模式：空闲触发——连续 3 秒没收到任何 frame 才发 ping，省电省带宽。
+    // pong 超时 2 秒；连续 2 次 pong 失败 → 强制 close → 触发重连。
+    // v1.3 test2 修订：加回 frame 超时检测（2 秒）与 ping/pong 并存。
+    // status broadcast 1Hz → 2 秒没收到任何 frame 就可判定链路断。
+    // 用户反馈 7 秒感知太慢，要求"立即"——2 秒是 1Hz 广播 2 个周期的
+    // 容忍，既避免单帧抖动误判又足够快。
+    const FRAME_TIMEOUT_MS = 2000;
+    const HEARTBEAT_IDLE_MS = 3000;
+    const HEARTBEAT_PING_TIMEOUT_MS = 2000;
+    const HEARTBEAT_MAX_FAILS = 2;
+    const HEARTBEAT_TICK_MS = 1000;
+    let lastFrameAt = 0;
+    let heartbeatTimer = null;
+    let pingSeq = 0;
+    let pendingPings = new Map();   // seq -> sentAtMs
+    let pingFailCount = 0;
+    function resetHeartbeatCounters() {
+        pingSeq = 0;
+        pendingPings = new Map();
+        pingFailCount = 0;
+    }
+    /**
+     * 立即切到"已断开"状态：disable 按钮 + banner + 丢弃旧 WS + 启动重连。
+     * heartbeat 超时和 ping 失败两条路径共用，确保逻辑一致。
+     *
+     * 关键：`currentWs = null` 让旧 WS 的 onclose 变 noop（`currentWs !== ws → return`）。
+     * 新 openWs 创建的 WS 如果也失败，它的 onclose 里 `currentWs === ws` 为 true →
+     * 走正常重连流程，循环直到 MAX_RECONNECT_ATTEMPTS 或连上。
+     */
+    function enterDisconnected() {
+        wsConnected = false;
+        setWebConnectionActive(false);
+        setConnectionWatermarkState('disconnected');
+        setSendEnabled(false);
+        setConn('app.disconnected');
+        if (hadConnected) showConnectionDialog('reconnecting', 'app.reconnecting');
+        stopHeartbeat();
+        activeUploads.forEach(xhr => { try { xhr.abort(); } catch(_) {} });
+        activeUploads = [];
+        const old = currentWs;
+        currentWs = null;    // 让旧 WS onclose 变 noop
+        try { old?.close(); } catch (_) {}
+        reconnectAttempts++;
+        if (!serverStopped && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            reconnectTimer = setTimeout(() => { reconnectTimer = null; openWs(); }, 1500);
+        } else if (!serverStopped) {
+            showConnectionDialog('terminated', 'app.service_maybe_closed');
+        }
+    }
+
+    function startHeartbeat() {
+        stopHeartbeat();
+        resetHeartbeatCounters();
+        heartbeatTimer = setInterval(() => {
+            if (!currentWs || currentWs.readyState !== 1) return;
+            const now = Date.now();
+            // Frame 超时快速检测：status broadcast 每秒来一次，2 秒没来 = 链路断。
+            // 关键：立即 disable 按钮 + 显示 banner，不等 ws.onclose。
+            // WiFi 断开后 ws.close() 要等 TCP 超时才触发 onclose（几十秒），
+            // 那时候用户早就失去耐心了。先改 UI 状态再关 socket。
+            if (now - lastFrameAt > FRAME_TIMEOUT_MS) {
+                enterDisconnected();
+                return;
+            }
+            // 空闲足够久就主动 ping（覆盖 status broadcast 停了但链路没断的场景）
+            if (now - lastFrameAt >= HEARTBEAT_IDLE_MS && pendingPings.size === 0) {
+                const seq = ++pingSeq;
+                pendingPings.set(seq, now);
+                try {
+                    currentWs.send(JSON.stringify({ type: 'ping', id: seq }));
+                } catch (_) { /* 发不出 → 下面超时分支自己处理 */ }
+            }
+            // 检查 pending ping 超时
+            for (const [seq, sentAt] of pendingPings) {
+                if (now - sentAt > HEARTBEAT_PING_TIMEOUT_MS) {
+                    pendingPings.delete(seq);
+                    pingFailCount++;
+                    if (pingFailCount >= HEARTBEAT_MAX_FAILS) {
+                        enterDisconnected();
+                        return;
+                    }
+                }
+            }
+        }, HEARTBEAT_TICK_MS);
+    }
+    function stopHeartbeat() {
+        if (heartbeatTimer != null) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    }
+    function handlePong(id) {
+        pendingPings.delete(id);
+        pingFailCount = 0;
+    }
+
+    function openWs() {
+        if (serverStopped) return;
+        if (currentWs && (currentWs.readyState === 0 || currentWs.readyState === 1)) return;
+        if (reconnectTimer != null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${proto}//${location.host}/ws`);
+        currentWs = ws;
+        const connectTimer = setTimeout(() => {
+            if (currentWs === ws && ws.readyState === 0) enterDisconnected();
+        }, 5000);
+        ws.onopen = () => {
+            clearTimeout(connectTimer);
+            if (currentWs !== ws || serverStopped) return;
+            wsConnected = true;
+            setWebConnectionActive(true);
+            serverStopped = false;
+            setConnectionWatermarkState('connected');
+            setConn('app.connected');
+            setSendEnabled(true);
+            lastFrameAt = Date.now();
+            reconnectAttempts = 0;   // 成功一次就清零计数
+            startHeartbeat();
+            // M9b: announce our avatar to the phone; fetch phone's info.
+            sendClientHello(false);
+            fetchPeerInfo().catch(() => {});
+            // 重连后追平断开期间手机端发的消息（seen 集合 dedup 防重复渲染）。
+            loadHistory().catch(() => {});
+            if (hadConnected) {
+                hideConnectionDialog();
+                if (window.flikky && window.flikky.showInfo) {
+                    window.flikky.showInfo(t('app.reconnected'));
+                }
+            } else {
+                hideConnectionDialog();
+            }
+            hadConnected = true;
+        };
+        ws.onclose = () => {
+            clearTimeout(connectTimer);
+            // enterDisconnected 把 currentWs 设为 null → 旧 WS 到这里 noop。
+            // 只有「新 WS 连接失败」或「server 正常 close」才走到下面。
+            if (currentWs !== ws) return;
+            currentWs = null;
+            wsConnected = false;
+            setWebConnectionActive(false);
+            setConnectionWatermarkState('disconnected');
+            setConn('app.disconnected');
+            setSendEnabled(false);
+            stopHeartbeat();
+            if (serverStopped) {
+                showConnectionDialog('terminated', 'app.service_stopped');
+                return;
+            }
+            if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                showConnectionDialog('terminated', 'app.service_maybe_closed');
+                return;
+            }
+            reconnectAttempts++;
+            if (hadConnected) {
+                showConnectionDialog('reconnecting', 'app.reconnecting_attempt', {
+                    attempt: reconnectAttempts,
+                    max: MAX_RECONNECT_ATTEMPTS,
+                });
+            }
+            reconnectTimer = setTimeout(() => { reconnectTimer = null; openWs(); }, 1500);
+        };
+        ws.onerror = () => {
+            // 不在 onerror 里做重试 — 让 onclose 兜底，避免双重 timer。
+        };
+        ws.onmessage = (e) => {
+            if (currentWs !== ws || serverStopped) return;
+            lastFrameAt = Date.now();
+            try { onWsEvent(JSON.parse(e.data)); } catch (_) {}
+        };
+    }
+
+    async function sendText() {
+        const text = (input.value || '').trim();
+        if (!text) return;
+        if (!wsConnected) {
+            if (window.flikky && window.flikky.showError) {
+                window.flikky.showError(t('app.wait_reconnect'));
+            }
+            return;
+        }
+        sendBtn.disabled = true;
+        try {
+            const r = await fetch('/api/messages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Client-Id': myClientId },
+                body: JSON.stringify({ text }),
+            });
+            if (r.ok) {
+                try {
+                    const dto = await r.json();
+                    // 本地立即渲染自己的消息，避免等服务端 WS 广播来回。
+                    // WS 后续到达的同 id 事件会被 seen 集合 dedup。
+                    if (dto && typeof dto.id === 'number') {
+                        seen.add(`text_added:${dto.id}`);
+                        renderText(dto, true);
+                    }
+                } catch (_) { /* ignore parse errors */ }
+                input.value = '';
+                autoGrowInput();
+            }
+        } catch (e) {
+            if (window.flikky && window.flikky.showError) {
+                window.flikky.showError(t('app.send_failed'));
+            }
+        } finally {
+            sendBtn.disabled = !wsConnected;
+            // 这里绕开了 setSendEnabled 直接改 disabled，而清空 input.value 又不会触发
+            // input 事件——所以 ready 态必须在这里显式重算，否则发完消息按钮还亮着。
+            // 放在 finally 覆盖全部出口：成功（已清空）、失败（文本仍在）、断线。
+            refreshSendReady();
+            input.focus();
+        }
+    }
+
+    function sendFile(file) {
+        const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const bubble = renderUploadingBubble({
+            localId,
+            name: file.name,
+            total: file.size,
+            mime: file.type,
+        });
+        const form = new FormData();
+        form.append('file', file, file.name);
+
+        const xhr = new XMLHttpRequest();
+        activeUploads.push(xhr);
+        xhr.timeout = 30 * 60 * 1000;
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+                updateBubbleProgress(bubble, e.loaded, e.total);
+                if (e.loaded >= e.total) {
+                    const pct = bubble.querySelector('.progress-pct');
+                    if (pct) {
+                        pct.dataset.flikkyI18n = 'app.processing';
+                        pct.textContent = t('app.processing');
+                    }
+                }
+            }
+        };
+        function removeFromActive() {
+            activeUploads = activeUploads.filter(x => x !== xhr);
+        }
+        xhr.onload = () => {
+            removeFromActive();
+            if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                    const dto = JSON.parse(xhr.responseText);
+                    markBubbleCompleted(bubble, dto);
+                } catch (_) {
+                    markBubbleFailed(bubble, file);
+                }
+            } else {
+                markBubbleFailed(bubble, file, xhr.status);
+            }
+        };
+        xhr.onerror = () => { removeFromActive(); markBubbleFailed(bubble, file); };
+        xhr.ontimeout = () => { removeFromActive(); markBubbleFailed(bubble, file, 'timeout'); };
+        xhr.onabort = () => { removeFromActive(); markBubbleFailedNoRetry(bubble, 'app.send_failed'); };
+        xhr.upload.onerror = () => { removeFromActive(); markBubbleFailed(bubble, file); };
+        xhr.upload.onabort = () => { removeFromActive(); markBubbleFailedNoRetry(bubble, 'app.send_failed'); };
+        xhr.open('POST', '/api/files');
+        xhr.setRequestHeader('X-Client-Id', myClientId);
+        xhr.setRequestHeader('X-File-Size', String(file.size));
+        xhr.send(form);
+    }
+
+    // ---- drag and drop upload (v1.16.0) ----
+    const dropOverlay = document.getElementById('drop-overlay');
+    let dragDepth = 0;
+
+    function isDirectoryItem(item) {
+        if (typeof item.webkitGetAsEntry !== 'function') return false;
+        const entry = item.webkitGetAsEntry();
+        return !!(entry && entry.isDirectory);
+    }
+
+    function splitDropItems(dataTransfer) {
+        const files = [];
+        let hadFolder = false;
+        const items = dataTransfer && dataTransfer.items ? Array.from(dataTransfer.items) : [];
+        for (const item of items) {
+            if (item.kind !== 'file') continue;
+            if (isDirectoryItem(item)) {
+                hadFolder = true;
+                continue;
+            }
+            const file = item.getAsFile();
+            if (file) files.push(file);
+        }
+        return { files, hadFolder };
+    }
+
+    function setDropOverlayVisible(visible) {
+        if (dropOverlay) dropOverlay.hidden = !visible;
+    }
+
+    function dragHasFiles(event) {
+        const types = event.dataTransfer && event.dataTransfer.types;
+        return !!types && Array.from(types).includes('Files');
+    }
+
+    document.addEventListener('dragenter', (event) => {
+        if (!dragHasFiles(event)) return;
+        event.preventDefault();
+        dragDepth += 1;
+        if (wsConnected) setDropOverlayVisible(true);
+    });
+    document.addEventListener('dragover', (event) => {
+        if (dragHasFiles(event)) event.preventDefault();
+    });
+    document.addEventListener('dragleave', (event) => {
+        if (!dragHasFiles(event)) return;
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) setDropOverlayVisible(false);
+    });
+    document.addEventListener('drop', (event) => {
+        if (!dragHasFiles(event)) return;
+        event.preventDefault();
+        dragDepth = 0;
+        setDropOverlayVisible(false);
+        if (!wsConnected) {
+            window.flikky.showError(t('app.wait_reconnect'));
+            return;
+        }
+        const { files, hadFolder } = splitDropItems(event.dataTransfer);
+        if (hadFolder) window.flikky.showError(t('app.drop_folder_unsupported'));
+        for (const file of files) sendFile(file);
+    });
+
+    // ---- lightbox fullscreen preview (v1.17.0) ----
+    const lightbox = document.getElementById('lightbox');
+    const lightboxContent = document.getElementById('lightbox-content');
+
+    function onLightboxKeydown(e) {
+        if (e.key === 'Escape') closeLightbox();
+    }
+
+    function openLightbox(options) {
+        if (!lightbox || !lightboxContent) return;
+        closeLightbox();
+        const kind = options && options.kind;
+        const fullUrl = String(options && options.fullUrl || '');
+        const thumbnailUrl = String(options && options.thumbnailUrl || '');
+        let el;
+        if (kind === 'video') {
+            el = document.createElement('video');
+            el.controls = true;
+            el.autoplay = true;
+            el.poster = thumbnailUrl;
+            el.src = fullUrl;
+        } else {
+            el = document.createElement('img');
+            el.src = thumbnailUrl;
+            el.alt = '';
+            // 预加载完成后才换 src —— 直接赋原图地址会让正在显示的缩略图
+            // 先变空白再出图，那正是渐进式要解决的问题。
+            const full = new Image();
+            full.addEventListener('load', function () {
+                el.src = fullUrl;
+                // 打标记触发一次短淡入：不加的话「模糊 → 清晰」是硬切，
+                // 比没有渐进式还突兀（chat.css 的 flikky-lightbox-sharpen）。
+                el.dataset.full = '1';
+            });
+            full.src = fullUrl;
+        }
+        el.className = 'lightbox-media';
+        lightboxContent.appendChild(el);
+        lightbox.hidden = false;
+        document.addEventListener('keydown', onLightboxKeydown);
+    }
+
+    function closeLightbox() {
+        if (!lightbox || !lightboxContent) return;
+        document.removeEventListener('keydown', onLightboxKeydown);
+        const video = lightboxContent.querySelector('video');
+        if (video) {
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+        }
+        while (lightboxContent.firstChild) lightboxContent.removeChild(lightboxContent.firstChild);
+        lightbox.hidden = true;
+    }
+
+    if (lightbox) {
+        lightbox.addEventListener('click', (e) => {
+            if (e.target === lightbox) closeLightbox();
+        });
+        const lightboxClose = document.getElementById('lightbox-close');
+        if (lightboxClose) lightboxClose.addEventListener('click', closeLightbox);
+    }
+
+    // ---- three-pane shell: drag-resize splitter, panel collapse, destination nav (v1.19.0) ----
+    const shell = document.getElementById('shell');
+    const shellSplitter = document.getElementById('splitter');
+    const chatPane = document.querySelector('.fk-pillar--chat');
+    const panelPane = document.querySelector('.fk-pillar--panel');
+    const SPLIT_MIN = 28;
+    const SPLIT_MAX = 72;
+
+    // rail 在右、或两栏互换，两者恰好一个成立时会话栏才在拖拽手柄左边——
+    // 用异或而不是分别 if，四种组合（rail 左右 × 是否对调）才不会漏掉一种。
+    function chatIsOnLeft() {
+        return (shell.dataset.railSide === 'right') !== (shell.dataset.swap === '1');
+    }
+
+    function applySplit(chatPercent) {
+        const clamped = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, chatPercent));
+        shell.style.setProperty('--flikky-split-chat', clamped + '%');
+        shell.style.setProperty('--flikky-split-panel', (100 - clamped) + '%');
+        return clamped;
+    }
+
+    function persistSplit(percent) {
+        try { localStorage.setItem('flikky_split_chat', String(Math.round(percent))); } catch (e) { /* 隐私模式禁写，忽略 */ }
+    }
+
+    function setPanel(shown) {
+        if (!shell) return;
+        shell.dataset.panel = shown ? 'shown' : 'hidden';
+        // 收起后 rail 不该再有高亮项 —— 见 syncRailSelection。
+        syncRailSelection();
+        try { localStorage.setItem('flikky_panel', shown ? '1' : '0'); } catch (e) { /* 隐私模式禁写，忽略 */ }
+    }
+
+    // 「rail 靠右」与「两栏对调」都是靠切换 flex 的 order 实现的（shell.css:120-143），
+    // 而 order **不可插值** —— 直接改属性只会得到一次瞬间跳位。这里用 FLIP：先量旧位置，
+    // 让调用方改状态，再把每根柱子用 transform 拉回原处、随后过渡到 0。transform 是
+    // 合成器属性，不触发重排。
+    // 面板脚本不自己做这件事：它拿不到「改之前」的几何，FLIP 的前提就是那次测量。
+    // 所以对外只暴露这个包装器，状态仍然由面板写（D1 不变）。
+    function animateShellLayout(mutate) {
+        if (typeof mutate !== 'function') return;
+        const reduce = typeof window.matchMedia === 'function'
+            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const panes = shell ? Array.prototype.slice.call(shell.children) : [];
+        if (!shell || reduce || !panes.length || typeof panes[0].getBoundingClientRect !== 'function') {
+            mutate();
+            return;
+        }
+        const before = panes.map((el) => el.getBoundingClientRect().left);
+        mutate();
+        const moved = [];
+        panes.forEach((el, i) => {
+            // 窄屏（rail 与手柄 display:none、单栏）这两个轴本就失效，dx 全是 0，
+            // 于是这里自然什么都不做，不需要额外判断断点。
+            const dx = before[i] - el.getBoundingClientRect().left;
+            if (!dx) return;
+            el.style.transition = 'none';
+            el.style.transform = `translateX(${dx}px)`;
+            moved.push(el);
+        });
+        if (!moved.length) return;
+        // 读一次布局强制刷新样式，否则「设置 transform」与下一行「清掉 transform」
+        // 会被合并成同一帧的无变化，过渡根本不会启动。
+        void shell.offsetWidth;
+        const dur = getComputedStyle(shell)
+            .getPropertyValue('--flikky-spring-spatial-default-dur').trim() || '317ms';
+        const ease = getComputedStyle(shell)
+            .getPropertyValue('--flikky-spring-spatial-default').trim() || 'ease';
+        moved.forEach((el) => {
+            el.style.transition = `transform ${dur} ${ease}`;
+            el.style.transform = '';
+        });
+        // 过渡结束后清掉内联样式，别把 transition 长期留在元素上影响别的属性。
+        const ms = parseFloat(dur) || 317;
+        setTimeout(() => {
+            moved.forEach((el) => {
+                el.style.transition = '';
+                el.style.transform = '';
+            });
+        }, ms + 60);
+    }
+
+    // 底部导航的选中态不自己记，一律从「这一栏此刻真的在显示什么」推出来：
+    // 状态属性用 aria-current 而不是 aria-selected：aria-selected 只在 tab / option /
+    // row / gridcell 这类角色上有效，<nav> 里的裸 <button> 上读屏会直接忽略它——
+    // v1.19.0 起「当前在哪个目的地」其实从未被朗读过。与面包屑（panel-files.js）对齐。
+    // mobileDest 是 chat 就选中会话，否则选中那个没被 hidden 的 .fk-view。
+    // 各处调用点各自 setAttribute 会立刻分叉出「显示 A 高亮 B」的状态——
+    // 兜底切换那条路径就是这么错的（见 selectDest 的 navigate 注释）。
+    function syncNavbarSelection() {
+        if (!shell) return;
+        let active = 'chat';
+        if (shell.dataset.mobileDest !== 'chat') {
+            const shown = document.querySelector('.fk-view:not([hidden])');
+            if (shown) active = shown.id.replace('view-', '');
+        }
+        document.querySelectorAll('.fk-navbar-item').forEach((btn) => {
+            btn.setAttribute('aria-current', btn.dataset.dest === active ? 'page' : 'false');
+        });
+    }
+
+    // rail 的选中态同理由 DOM 反推，而且多一个条件：功能栏收起时**没有**任何目的地
+    // 是当前项——那一栏根本没在显示。原先 selectDest 把选中态一写就不管了，
+    // 收起后指示器还亮着，指向一个看不见的面板。
+    function syncRailSelection() {
+        if (!shell) return;
+        const shown = shell.dataset.panel === 'hidden'
+            ? null
+            : document.querySelector('.fk-view:not([hidden])');
+        const active = shown ? shown.id.replace('view-', '') : null;
+        document.querySelectorAll('.fk-rail-item').forEach((btn) => {
+            btn.setAttribute('aria-current', btn.dataset.dest === active ? 'page' : 'false');
+        });
+    }
+
+    // 窄屏是单栏，一次只显示一个目的地。这里只管「显示哪一栏」，不碰 .fk-view
+    // 的 hidden——那是 selectDest 的职责，两者的分工是「哪一栏」对「栏里是谁」。
+    function setMobileDest(dest) {
+        if (!shell) return;
+        shell.dataset.mobileDest = dest === 'chat' ? 'chat' : 'panel';
+        syncNavbarSelection();
+    }
+
+    // 点任一导航目的地：顺带展开功能栏（折叠的是功能栏，rail 永远常驻），
+    // 同步 rail 的 aria-current，并在两个 .fk-view 之间切换 hidden。
+    // "chat" 是特例：它只在移动端底部导航出现（桌面 rail 没有这个目的地），
+    // 且没有对应的 .fk-view —— 提前 return，只切 mobileDest，绝不动
+    // data-panel 或任何 .fk-view 的 hidden。
+    function selectDest(dest, options) {
+        if (!shell) return;
+        if (dest === 'chat') {
+            setMobileDest('chat');
+            return;
+        }
+        const entry = Array.prototype.slice.call(document.querySelectorAll('.fk-rail-item'))
+            .find((btn) => btn.dataset.dest === dest);
+        if (!entry || entry.hidden) dest = firstAvailableDest();
+        // Feature updates replace invalid content without reopening a collapsed panel.
+        if (!options || options.navigate !== false) setPanel(true);
+        document.querySelectorAll('.fk-view').forEach((view) => {
+            view.hidden = view.id !== `view-${dest}`;
+        });
+        // 必须在切换 .fk-view 之后：它是从「哪个 view 没被 hidden」反推的。
+        // setPanel 里也调过一次，但那时视图还没切，读到的是上一个。
+        syncRailSelection();
+        // favoriteEnabled 关掉时的兜底切换不是一次导航，只是把一个已经无效的视图
+        // 换掉。窄屏上要是连 mobileDest 一起改，用户会在 peer-info 到达的那一刻
+        // 被从会话页甩进设置页——他并没有点任何东西。视图还是要换，所以底部导航
+        // 的选中态照样重算一遍。
+        if (options && options.navigate === false) syncNavbarSelection();
+        else setMobileDest(dest);
+    }
+    // 目的地按 rail 里的书写顺序排；本函数只回答「此刻第一个可用的是谁」。
+    // 不写死 'files'：主开关默认关闭，写死会让默认安装状态下功能栏空着。
+    function firstAvailableDest() {
+        const items = Array.prototype.slice.call(document.querySelectorAll('.fk-rail-item'));
+        const found = items.find((btn) => !btn.hidden);
+        return found ? found.dataset.dest : 'settings';
+    }
+
+    // 主开关驱动文件目的地的显隐。关掉时若用户正停在文件面板，换一个视图但
+    // **不动 mobileDest** —— 窄屏上那会在广播到达的瞬间把用户从会话页甩走。
+    function applyStorageBrowsing(enabled) {
+        document.body.dataset.storageBrowsing = enabled ? '1' : '0';
+        document.querySelectorAll('[data-dest="files"]').forEach((btn) => { btn.hidden = !enabled; });
+        const view = document.getElementById('view-files');
+        if (!enabled && view && !view.hidden) {
+            selectDest(firstAvailableDest(), { navigate: false });
+        }
+        // 面板自己不猜开关状态：它在脚本加载时（peer-info 之前）无从得知，
+        // 猜的结果就是关闭时也请求一次、撞上 404、报成「这个位置已经不存在了」。
+        // 本函数是开关状态的唯一写入点，顺手告诉它。
+        if (window.flikkyPanels && window.flikkyPanels.files
+            && typeof window.flikkyPanels.files.setEnabled === 'function') {
+            window.flikkyPanels.files.setEnabled(enabled);
+        }
+    }
+
+    // 对端开关驱动相册目的地的显隐。关掉时若用户正停在相册面板，换一个视图但
+    // 不动 mobileDest：peer-info 异步到达不应把窄屏用户从会话页甩进功能面板。
+    function applyAlbumBrowsing(enabled) {
+        document.body.dataset.albumBrowsing = enabled ? '1' : '0';
+        document.querySelectorAll('[data-dest="album"]').forEach((btn) => { btn.hidden = !enabled; });
+        const view = document.getElementById('view-album');
+        if (!enabled && view && !view.hidden) {
+            selectDest(firstAvailableDest(), { navigate: false });
+        }
+        if (window.flikkyPanels && window.flikkyPanels.album
+            && typeof window.flikkyPanels.album.setEnabled === 'function') {
+            window.flikkyPanels.album.setEnabled(enabled);
+        }
+    }
+
+    // 连接成功后功能栏落在第一个可用目的地（spec 4.1）。只施加一次：
+    // peer-info 与 settings_changed 走同一个处理函数，不加闸就变成「每次改设置
+    // 都把用户拽回去」。
+    let defaultFocusApplied = false;
+    function applyDefaultFocusOnce() {
+        if (defaultFocusApplied) return;
+        defaultFocusApplied = true;
+        selectDest(firstAvailableDest(), { navigate: false });
+    }
+
+    window.setPanel = setPanel;
+    window.selectDest = selectDest;
+    window.setMobileDest = setMobileDest;
+    window.flikky = window.flikky || {};
+    window.flikky.animateShellLayout = animateShellLayout;
+    // 分类图标映射的唯一事实源，供收藏面板取用（见 fileSymbolName 处的注释）。
+    window.flikky.fileSymbolName = fileSymbolName;
+    window.flikky.mediaKind = mediaKind;
+    window.flikky.openLightbox = openLightbox;
+    // 字节格式化：本文件与 panel-favorites.js 各有一份语义相同的实现（backlog 待收敛）。
+    // 新面板一律用这个导出，不要再造第四份。
+    window.flikky.formatSize = formatSize;
+
+    // 滚动条只在真的滚动时露出（shell.css 的 [data-scrolling]）。scroll 事件不冒泡，
+    // 所以监听器必须挂在 capture 阶段——一个委派监听器覆盖全部 .flikky-scroll，
+    // 包括面板脚本运行时才建出来的那些。
+    const scrollIdleTimers = new WeakMap();
+    document.addEventListener('scroll', (e) => {
+        const el = e.target;
+        if (!el || !el.classList || !el.classList.contains('flikky-scroll')) return;
+        el.dataset.scrolling = '1';
+        clearTimeout(scrollIdleTimers.get(el));
+        scrollIdleTimers.set(el, setTimeout(() => { delete el.dataset.scrolling; }, 900));
+    }, true);
+
+    if (shell && shellSplitter && chatPane && panelPane) {
+        let dragging = false;
+        let dragStartX = 0;
+        let dragStartChatWidth = 0;
+        let dragTotalWidth = 0;
+
+        shellSplitter.addEventListener('pointerdown', (e) => {
+            dragging = true;
+            shell.classList.add('is-dragging');
+            dragStartX = e.clientX;
+            dragStartChatWidth = chatPane.getBoundingClientRect().width;
+            dragTotalWidth = dragStartChatWidth + panelPane.getBoundingClientRect().width;
+            shellSplitter.setPointerCapture(e.pointerId);
+        });
+        shellSplitter.addEventListener('pointermove', (e) => {
+            if (!dragging || dragTotalWidth <= 0) return;
+            const dx = e.clientX - dragStartX;
+            const signedDx = chatIsOnLeft() ? dx : -dx;
+            applySplit(((dragStartChatWidth + signedDx) / dragTotalWidth) * 100);
+        });
+        function endDrag(e) {
+            if (!dragging) return;
+            dragging = false;
+            shell.classList.remove('is-dragging');
+            persistSplit(parseFloat(shell.style.getPropertyValue('--flikky-split-chat')) || 58);
+        }
+        shellSplitter.addEventListener('pointerup', endDrag);
+        shellSplitter.addEventListener('pointercancel', endDrag);
+        // 手柄 role="separator" tabindex="0"：键盘也要能拖，方向与「会话栏在左/右」一致。
+        shellSplitter.addEventListener('keydown', (e) => {
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+            e.preventDefault();
+            const current = parseFloat(shell.style.getPropertyValue('--flikky-split-chat')) || 58;
+            const growsChat = (e.key === 'ArrowRight') === chatIsOnLeft();
+            persistSplit(applySplit(current + (growsChat ? 2 : -2)));
+        });
+    }
+
+    document.querySelectorAll('.fk-rail-item, .fk-navbar-item').forEach((btn) => {
+        btn.addEventListener('click', () => selectDest(btn.dataset.dest));
+    });
+
+    // 「收起功能栏」按钮每个面板一个，而面板脚本在 app.js 之后加载、有的还是运行时
+    // 建出来的——直接 querySelectorAll 绑定会漏掉它们。用一个委派监听器覆盖全部，
+    // 顺带让 shell.dataset.panel 只有 setPanel 这一个写入方：面板只负责画按钮。
+    document.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.fk-panel-collapse')) setPanel(false);
+    });
+
+    // 布局偏好来自上一次会话；分栏比例与折叠态都是非敏感的纯展示状态，可以放 localStorage。
+    if (shell) {
+        try {
+            const railSide = localStorage.getItem('flikky_rail_side');
+            if (railSide === 'left' || railSide === 'right') shell.dataset.railSide = railSide;
+        } catch (e) { /* 隐私模式禁读，忽略 */ }
+        try {
+            const swap = localStorage.getItem('flikky_pane_swap');
+            if (swap === '0' || swap === '1') shell.dataset.swap = swap;
+        } catch (e) { /* 隐私模式禁读，忽略 */ }
+        try {
+            const panel = localStorage.getItem('flikky_panel');
+            if (panel === '0' || panel === '1') shell.dataset.panel = panel === '1' ? 'shown' : 'hidden';
+        } catch (e) { /* 隐私模式禁读，忽略 */ }
+        try {
+            const pct = parseFloat(localStorage.getItem('flikky_split_chat'));
+            if (!Number.isNaN(pct) && pct >= SPLIT_MIN && pct <= SPLIT_MAX) applySplit(pct);
+        } catch (e) { /* 隐私模式禁读，忽略 */ }
+    }
+
+    saveAllFab.addEventListener('click', (e) => { e.stopPropagation(); toggleSaveAllMenu(); });
+    document.addEventListener('click', (e) => {
+        if (!saveAllDropdown.hidden && !saveAllDropdown.contains(e.target)) closeSaveAllMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape' || saveAllDropdown.hidden) return;
+        // 连接丢失对话框是程序化弹出的（app.js:1471），可能在菜单开着时出现；
+        // 此时 Esc 属于对话框，别把焦点抢到 scrim 后面的 FAB 上。
+        if (document.querySelector('mdui-dialog[open]')) return;
+        closeSaveAllMenu({ restoreFocus: true });
+    });
+    saveAllEachItem.addEventListener('click', () => { closeSaveAllMenu(); saveAllIndividually(); });
+    saveAllZipItem.addEventListener('click', () => { closeSaveAllMenu(); saveAllAsZip(); });
+    sendBtn.addEventListener('click', sendText);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+    });
+    input.addEventListener('input', () => {
+        autoGrowInput();
+        refreshSendReady();
+    });
+    fileBtn.addEventListener('click', () => filePicker.click());
+    filePicker.addEventListener('change', () => {
+        for (const f of filePicker.files) sendFile(f);
+        filePicker.value = '';
+    });
+
+    i18n.onChange(() => {
+        conn.textContent = t(currentConnKey);
+        if (lastStatus) renderStatus();
+        else countEl.textContent = countText('app.files', 0);
+        renderPeerHeader(currentDeviceName, phoneAvatarKey);
+        refreshDefaultWatermark();
+        const fillLabel = document.getElementById('avatar-fill-label');
+        if (fillLabel) fillLabel.textContent = t('app.filled_icons');
+        document.querySelectorAll('[data-flikky-i18n]').forEach((element) => {
+            element.textContent = t(element.dataset.flikkyI18n);
+        });
+        document.querySelectorAll('[data-flikky-i18n-title]').forEach((element) => {
+            element.title = t(element.dataset.flikkyI18nTitle);
+        });
+        if (connectionDialogState && connectionDialogMessage) {
+            connectionDialogMessage.textContent = t(connectionDialogState.key, connectionDialogState.values);
+        }
+        refreshAllMessageActions();
+        refreshSaveAllFab();
+        closeRecallMenu();
+        fetchPeerInfo().catch(() => {});
+    });
+
+    // 初始禁用，等 WS 连上后启用。
+    refreshSaveAllFab();
+    setSendEnabled(false);
+    openWs(); // History is loaded on every successful connection, including the first.
+})();

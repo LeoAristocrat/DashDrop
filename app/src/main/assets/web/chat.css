@@ -1,0 +1,1068 @@
+/* ============================================================================
+ * 会话页：三柱布局里的 .fk-pillar--chat 内容（头部 / 消息列表 / 输入坞 / FAB）。
+ * 从原型 docs/others/prototypes/v1.19.0-web/css/chat.css 移植，按映射表把类名
+ * 翻译成生产命名（.fk-row → .bubble-row、.fk-bubble → .bubble、
+ * .fk-act → .msg-actions mdui-button-icon 等），变量前缀 --fk- → --flikky-。
+ * 原本散在 app.css 里的会话页小节（三段式外壳残留、气泡、文件泡、上传进度、
+ * 断连模态、失败态、头像、时间戳分隔条、水印、长按菜单、拖拽覆盖层、媒体缩略图泡、
+ * 消息动作栏）迁到这里；app.css 只留登录页与导出页样式。
+ * ==========================================================================*/
+
+:root {
+  /* 按压形变：圆 ↔ 方の两组 token，及各自独立的按下/松开时序。
+   * 用百分比而不是 999px —— 写 999px 时半径 ≥ 半宽都长得一样，插值前 90%
+   * 肉眼无变化，最后一瞬突然跳变。按下用更长的 ease-out，松开走基础规则自带的
+   * spring（各选择器自己 transition 里已经声明），二者时长/曲线不同。 */
+  --flikky-morph-round: 50%;
+  --flikky-morph-round-pressed: 28%;
+  --flikky-morph-sq: 28%;
+  --flikky-morph-sq-pressed: 50%;
+  --flikky-morph-press-dur: 400ms;
+  --flikky-morph-press-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  --flikky-message-enter-duration: 300ms;
+  --flikky-stagger: calc(40ms * var(--flikky-motion-scale));
+
+  --flikky-dock-inset: var(--flikky-space-lg);
+  /* 静止用 container-high、聚焦才升到 container-highest —— 与收藏页搜索框同一梯度。
+     原先静止就直接给了 highest，也就是搜索框的「聚焦色」，于是输入坞看起来永远
+     像被 hover 着，而真正聚焦时又毫无变化。 */
+  --flikky-dock-bg: rgb(var(--mdui-color-surface-container-high));
+  --flikky-dock-bg-focus: rgb(var(--mdui-color-surface-container-highest));
+  --flikky-dock-border: 2px;
+  /* 输入坞单行高度，同时也是一键保存 FAB 的边长 —— 两者必须等高，所以由同一个
+     token 算出来而不是各写一个数：内容(48) + 上下 padding(4×2) + 上下边框(2×2)。
+     坞在多行时会超过这个高度，FAB 保持单行高、靠 .fk-dock-row 的 align-items
+     贴底对齐。 */
+  --flikky-dock-h: calc(
+    var(--flikky-size-touch) + 2 * var(--flikky-space-xs) + 2 * var(--flikky-dock-border)
+  );
+  --flikky-bubble-max: 78%;
+  --flikky-bubble-radius-tight: 4px;
+  --flikky-size-touch: 48px;
+  --flikky-size-file-icon: 40px;
+}
+
+/* ── 消息列表容器 ────────────────────────────────────────────────────────── */
+
+.chat-list-shell {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: rgb(var(--mdui-color-surface-container-lowest));
+}
+
+.chat-list {
+  height: 100%;
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: var(--flikky-space-screen-edge);
+  /* 底部额外留白，给悬浮输入坞 + FAB 让位，最后一条消息不会被压住。 */
+  padding-bottom: calc(var(--flikky-dock-inset) * 2 + 64px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--flikky-space-list-gap);
+  background: transparent;
+  position: relative;
+  z-index: 1;
+}
+
+/* ── 消息气泡 ────────────────────────────────────────────────────────────── */
+
+.bubble {
+  max-width: var(--flikky-bubble-max);
+  padding: 10px 14px;
+  border-radius: var(--flikky-bubble-radius);
+  overflow-wrap: anywhere;
+  font: var(--flikky-type-body-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-large-tracking);
+  transition: border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default);
+}
+/* 事实源 ui/components/MessageBubble.kt:80 —— me = primary/on-primary，
+   them = surface-container-high/on-surface。用 .bubble-row.__ .bubble 挂色，
+   而不是 .bubble.__ 自身——对齐已经交给行的 flex-direction，气泡不用再自带
+   align-self（下面的「行内覆盖」规则会统一把它设回 auto）。 */
+.bubble-row.them .bubble {
+  background: rgb(var(--mdui-color-surface-container-high));
+  color: rgb(var(--mdui-color-on-surface));
+}
+.bubble-row.me .bubble {
+  background: rgb(var(--mdui-color-primary));
+  color: rgb(var(--mdui-color-on-primary));
+}
+
+.file-bubble {
+  max-width: var(--flikky-bubble-max);
+  padding: 12px 14px;
+  border-radius: var(--flikky-bubble-radius);
+  background: rgb(var(--mdui-color-surface-container-high));
+  color: rgb(var(--mdui-color-on-surface));
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default);
+}
+.file-bubble.me {
+  background: rgb(var(--mdui-color-primary));
+  color: rgb(var(--mdui-color-on-primary));
+  align-self: flex-end;
+}
+.file-bubble .file-icon {
+  width: var(--flikky-size-file-icon);
+  height: var(--flikky-size-file-icon);
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  clip-path: var(--flikky-leading-clip);
+  background: rgb(var(--mdui-color-secondary-container));
+  color: rgb(var(--mdui-color-on-secondary-container));
+}
+.file-bubble .file-icon .material-symbols-outlined {
+  font-size: 24px;
+}
+.bubble-row.me .file-bubble .file-icon {
+  background: rgba(var(--mdui-color-on-primary), .18);
+  color: rgb(var(--mdui-color-on-primary));
+}
+.file-bubble a {
+  color: inherit;
+  text-decoration: none;
+  flex: 1;
+  font: var(--flikky-type-label-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-large-tracking);
+}
+.file-bubble .size {
+  font: var(--flikky-type-body-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-small-tracking);
+  opacity: .8;
+}
+
+/* Uploading state — progress bar and percent share the bubble footer.
+   保留旧版白底数值：uploading 只发生在自己发出的文件（永远落在 primary 底的
+   me 气泡上），rgba(255,255,255,.25) 在这个场景下始终对比正确，不必为它引入
+   currentColor/color-mix 的额外复杂度。 */
+.file-bubble.uploading {
+  flex-wrap: wrap;
+}
+.file-bubble.uploading .progress-bar {
+  flex-basis: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.file-bubble.uploading .progress-fill {
+  height: 100%;
+  background: rgb(var(--mdui-color-on-primary));
+  width: 0%;
+  transition: width 0.15s ease-out;
+}
+.file-bubble.uploading .progress-pct {
+  flex-basis: 100%;
+  text-align: right;
+  font-size: 12px;
+  opacity: .85;
+  margin-top: 2px;
+}
+
+/* Connection loss is modal because no message action can succeed until the
+ * socket returns. The dialog itself is intentionally non-dismissible; only a
+ * successful reconnect closes it. */
+#connection-dialog::part(overlay) {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+#connection-dialog::part(header) {
+  align-items: center;
+  text-align: center;
+}
+#connection-dialog::part(icon) {
+  width: 100%;
+  justify-content: center;
+}
+#connection-dialog::part(headline) {
+  width: 100%;
+  justify-content: center;
+  text-align: center;
+}
+#connection-dialog::part(body) {
+  text-align: center;
+}
+#connection-dialog-message {
+  color: rgb(var(--mdui-color-on-surface-variant));
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* Failed state — paint the entire bubble in error-container so the
+ * error is obvious at a glance. The whole bubble becomes a click target
+ * for retry. */
+.file-bubble.failed,
+.file-bubble.failed.me {
+  flex-wrap: wrap;
+  background: rgb(var(--mdui-color-error-container));
+  color: rgb(var(--mdui-color-on-error-container));
+  outline: 2px solid rgb(var(--mdui-color-error));
+  outline-offset: -2px;
+  cursor: pointer;
+}
+.file-bubble.failed .retry-hint {
+  flex-basis: 100%;
+  color: rgb(var(--mdui-color-error));
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+/* v1.3 D26 修订：撤回 = 节点完全消失，不再保留 .recalled 占位符样式。 */
+
+/* ── 头像 ────────────────────────────────────────────────────────────────── */
+
+/* Generic avatar circle — used in header and bubble rows */
+.avatar-circle {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  background: rgb(var(--mdui-color-secondary-container));
+  color: rgb(var(--mdui-color-on-secondary-container));
+  flex-shrink: 0;
+  user-select: none;
+}
+.avatar-symbol {
+  font-size: 22px;
+}
+
+/* ── 可选中白名单（默认关在 base.css）────────────────────────────────────────
+ * 会话页里「属于用户的内容」只有这几处：文本消息本体、文件名、文件大小、
+ * 媒体气泡的标题。收到一段文本就是为了复制它，这条不能关。
+ * 头像（.avatar-circle）已在上面单独关掉——它的字符/图标是身份标识不是内容。
+ * 时间戳分隔条、水印、连接状态、对方名、运行统计都属界面，不在白名单里。 */
+.bubble,
+.file-bubble a,
+.file-bubble .size,
+.thumb-caption {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* 注意这里不需要再把子元素里的图标关一遍：user-select 是继承属性，而
+   .material-symbols-outlined 上是一条**直接声明** —— 直接声明优先于继承，与源码
+   顺序无关。只有当白名单自己匹配到图标元素（比如写成 `.file-bubble *`）才会变成
+   同级竞争，所以白名单一律不用 `*`。 */
+
+/* ── 会话栏头部 ──────────────────────────────────────────────────────────
+ * 一行：头像 · 对方名（可伸缩）· 运行统计 · 连接状态 chip。
+ * 这三条规则在 v1.19.0 移植 chat.css 时整段漏掉了，头部退化成块级堆叠——
+ * 头像、名字、统计各占一行，统计三段还挤在一起（见 Screenshot_21）。
+ * 没有任何测试断言过它们，所以一路全绿。现在有了（app-chat-visual.test.js）。 */
+.fk-chat-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--flikky-space-md);
+  padding: var(--flikky-space-lg) var(--flikky-space-xl);
+  min-height: 72px;
+}
+
+/* 名字这一格吃掉剩余宽度，min-width:0 才能让里面的省略号真的生效 */
+.fk-chat-peer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 统计常驻显示（不收进 chip 里点开）——运行时长/文件数/速率与 App 会话页一样
+   是一直看得见的状态，不该藏在交互之后。 */
+.fk-chat-stats {
+  flex: none;
+  display: flex;
+  align-items: center;
+  font: var(--flikky-type-body-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-medium-tracking);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  white-space: nowrap;
+}
+/* 分隔点由 CSS 生成而不是塞进 markup：三个 span 的内容由 app.js 各自
+   textContent 写入，任何写在里面的分隔符都会被下一次更新抹掉。 */
+.fk-chat-stats > span + span::before {
+  content: '·';
+  margin: 0 var(--flikky-space-sm);
+  opacity: .5;
+}
+
+/* Header: peer name, next to the peer avatar in .fk-chat-head */
+.header-peer-name {
+  font: var(--flikky-type-title-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-title-medium-tracking);
+  color: rgb(var(--mdui-color-on-surface));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+
+/* Avatar picker — the dialog chrome (overlay / panel / headline) is provided by
+ * the official mdui-dialog; only the preset grid needs custom layout. */
+.avatar-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--flikky-space-md);
+  justify-items: center;
+  overflow: visible;
+  padding: 6px;
+}
+.avatar-fill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--flikky-space-md);
+  margin: 0 6px var(--flikky-space-md);
+  font: var(--flikky-type-body-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-medium-tracking);
+  color: rgb(var(--mdui-color-on-surface));
+  /* mdui-switch 的态层比开关本身更宽，行内溢出会被裁掉一圈；clip 只挡溢出的
+     态层视觉，不影响行内可点区域。 */
+  overflow-x: clip;
+}
+.avatar-picker-grid .avatar-circle {
+  width: 48px;
+  height: 48px;
+  min-width: 48px;
+  font-size: 22px;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition:
+    box-shadow var(--flikky-spring-effects-fast-dur) var(--flikky-spring-effects-fast),
+    background-color var(--flikky-spring-effects-fast-dur) var(--flikky-spring-effects-fast),
+    border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default);
+}
+.avatar-picker-grid .avatar-circle:hover {
+  background: rgb(var(--mdui-color-secondary-container));
+}
+.avatar-picker-grid .avatar-circle:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 3px rgb(var(--mdui-color-primary));
+}
+.avatar-picker-grid .avatar-circle[aria-selected="true"] {
+  outline: none;
+  box-shadow: inset 0 0 0 3px rgb(var(--mdui-color-primary));
+}
+.avatar-picker-grid .avatar-circle:active {
+  border-radius: var(--flikky-morph-round-pressed);
+  transition: border-radius var(--flikky-morph-press-dur) var(--flikky-morph-press-ease);
+}
+.avatar-char-cell {
+  width: 48px;
+  height: 48px;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  font: inherit;
+  font-size: 22px;
+  font-weight: 600;
+  background: rgb(var(--mdui-color-secondary-container));
+  color: rgb(var(--mdui-color-on-secondary-container));
+  transition: border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default);
+}
+.avatar-char-cell:active {
+  border-radius: var(--flikky-morph-round-pressed);
+  transition: border-radius var(--flikky-morph-press-dur) var(--flikky-morph-press-ease);
+}
+
+/* ── 连接状态 chip ───────────────────────────────────────────────────────── */
+
+/* 官方 mdui-chip（assist, selected），只调 8dp 圆角——不发明额外的状态点。
+   --shape-corner 才是穿透 shadow DOM 的真实生效机制；显式 border-radius 只是
+   给未走 shadow DOM 的场合兜底，两条都要有。 */
+#conn {
+  height: 32px;
+  --shape-corner: var(--flikky-shape-xs);
+  border-radius: var(--flikky-shape-xs);
+}
+
+/* ── 消息行：分组间距与首尾角形变 ────────────────────────────────────────── */
+
+@keyframes flikky-message-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.bubble-row {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--flikky-space-sm);
+  margin-bottom: var(--flikky-space-lg);
+}
+.bubble-row:last-child {
+  margin-bottom: 0;
+}
+.bubble-row.me {
+  flex-direction: row-reverse;
+  align-self: flex-end;
+}
+.bubble-row.them {
+  flex-direction: row;
+  align-self: flex-start;
+}
+
+/* 组内 4px、组间 16px。分组由 app.js 在 reflowMessageAvatars 里按发送者+时间窗
+   打上 grouped-start/-mid/-end（见 applyGroupingClasses）。 */
+.bubble-row.grouped-start,
+.bubble-row.grouped-mid {
+  margin-bottom: var(--flikky-space-xs);
+}
+
+/* ── 圆角收紧只在 FLOATING 下生效 ──
+ * 「连接式列表组」那套相邻角收紧靠的是气泡彼此紧贴。INLINE 常驻操作按钮会在每条
+ * 消息旁/下占一格，本来就把这条连续的边打断了，收紧的角只剩零碎感。
+ * 用 CSS 门控而不是在 applyGroupingClasses 里少加 class：手机切换操作样式时
+ * body 的 data-action-style 一变就即时生效，不需要重建整个列表。
+ * 分组间距（上面 4px / 16px 那条）不受门控——连续消息挨得更近是所有聊天软件的
+ * 常规，与角的处理是两件事。 */
+body[data-action-style="FLOATING"] .bubble-row.grouped-start .bubble,
+body[data-action-style="FLOATING"] .bubble-row.grouped-start .file-bubble {
+  border-end-end-radius: var(--flikky-bubble-radius-tight);
+}
+body[data-action-style="FLOATING"] .bubble-row.grouped-mid .bubble,
+body[data-action-style="FLOATING"] .bubble-row.grouped-mid .file-bubble {
+  border-start-end-radius: var(--flikky-bubble-radius-tight);
+  border-end-end-radius: var(--flikky-bubble-radius-tight);
+}
+body[data-action-style="FLOATING"] .bubble-row.grouped-end .bubble,
+body[data-action-style="FLOATING"] .bubble-row.grouped-end .file-bubble {
+  border-start-end-radius: var(--flikky-bubble-radius-tight);
+}
+/* them 侧：头像在左，收紧的是 start 角，end 角还原成完整圆角 */
+body[data-action-style="FLOATING"] .bubble-row.them.grouped-start .bubble,
+body[data-action-style="FLOATING"] .bubble-row.them.grouped-start .file-bubble {
+  border-end-end-radius: var(--flikky-bubble-radius);
+  border-end-start-radius: var(--flikky-bubble-radius-tight);
+}
+body[data-action-style="FLOATING"] .bubble-row.them.grouped-mid .bubble,
+body[data-action-style="FLOATING"] .bubble-row.them.grouped-mid .file-bubble {
+  border-start-end-radius: var(--flikky-bubble-radius);
+  border-end-end-radius: var(--flikky-bubble-radius);
+  border-start-start-radius: var(--flikky-bubble-radius-tight);
+  border-end-start-radius: var(--flikky-bubble-radius-tight);
+}
+body[data-action-style="FLOATING"] .bubble-row.them.grouped-end .bubble,
+body[data-action-style="FLOATING"] .bubble-row.them.grouped-end .file-bubble {
+  border-start-end-radius: var(--flikky-bubble-radius);
+  border-start-start-radius: var(--flikky-bubble-radius-tight);
+}
+
+/* 新增行的入场动效——只挂在这个修饰类上，不挂在 .bubble-row 本身，否则每次
+   重建列表整屏消息都会重播一次入场，观感是「闪一下」。app.js 在 appendBubbleRow
+   里只对非历史回放的行加这个类（见 replayingHistory）。 */
+.bubble-row--enter {
+  animation-name: flikky-message-enter;
+  animation-duration: var(--flikky-message-enter-duration);
+  animation-timing-function: cubic-bezier(0.05, 0.7, 0.1, 1);
+  animation-fill-mode: both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble-row--enter {
+    animation-duration: 0ms;
+  }
+}
+
+/* Override bubble self-alignment: the row handles alignment now */
+.bubble-row .bubble,
+.bubble-row .file-bubble {
+  align-self: auto;
+}
+/* Avatar spacer: same width as avatar-circle, invisible, keeps bubbles aligned */
+.avatar-spacer {
+  width: 36px;
+  min-width: 36px;
+  flex-shrink: 0;
+}
+
+/* v1.18: 会话时间戳分隔条（显隐由 body[data-timestamps] 控制，开关即时生效）。
+   RoundedCornerShape(8.dp)、padding h10 v3、labelSmall、onSurfaceVariant —— 对齐
+   SessionTimeDivider.kt。 */
+.time-divider { display: none; justify-content: center; margin: 6px 0; }
+body[data-timestamps="on"] .time-divider { display: flex; }
+.time-divider-pill {
+  padding: 3px 10px;
+  border-radius: var(--flikky-shape-xs);
+  font: var(--flikky-type-label-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-small-tracking);
+  background: rgb(var(--mdui-color-surface-container-high));
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* DEFAULT-mode watermark belongs to the fixed chat viewport, not the scrolling
+ * list, so it stays centered while messages move beneath it. */
+.chat-list-watermark {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 0;
+  font: var(--flikky-type-body-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-small-tracking);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  opacity: 0.35;
+}
+/* Bubble rows need z-index > 0 to float above the watermark */
+.chat-list > .bubble-row,
+.chat-list > .bubble,
+.chat-list > .file-bubble { position: relative; z-index: 1; }
+
+/* v1.3 B4 长按撤回菜单。手写外层只负责 fixed 定位到 pointer 坐标（mdui-dropdown
+ * 的 anchor 模型不支持任意坐标）；容器面板 / 圆角 / 海拔 / 菜单项样式全部交给内部的
+ * 官方 mdui-menu / mdui-menu-item。 */
+.recall-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 96px;
+}
+
+/* ── 拖拽上传覆盖层 ──────────────────────────────────────────────────────── */
+
+/* v1.16.0 drag and drop upload overlay: body-level fixed layer, pointer-events
+ * none so the drop event lands on document, not on the overlay itself. */
+/* display:flex below outranks the UA sheet's [hidden] rule; keep this explicit. */
+.drop-overlay[hidden] {
+  display: none;
+}
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.drop-overlay-card {
+  padding: var(--flikky-space-xl) var(--flikky-space-xxxl);
+  border-radius: var(--flikky-shape-lg);
+  border: 2px dashed rgb(var(--mdui-color-primary));
+  background: rgb(var(--mdui-color-surface-container-high));
+  color: rgb(var(--mdui-color-on-surface));
+  font: var(--flikky-type-title-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-title-medium-tracking);
+}
+
+/* ── 媒体缩略图泡 ────────────────────────────────────────────────────────── */
+
+/* v1.17.0 media thumbnail bubble.
+   Mainstream-chat sizing: scale the thumb proportionally into a 240x320 box —
+   no cropping, so tall screenshots become narrow strips and wide ones flat strips.
+   The 96px min edge only bites on extreme ratios, where object-fit:cover
+   center-crops instead of collapsing to a sliver.
+   Frameless like the App: zero padding, the image runs edge-to-edge and the
+   bubble's own radius + overflow:hidden clips its top corners. The image's max
+   constraints are the single source of bubble width — max-width:none kills the
+   base .file-bubble cap, which otherwise squeezes the bubble narrower than the
+   240px image. The caption must not contribute to intrinsic width. */
+.file-bubble.media {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  width: fit-content;
+  max-width: none;
+}
+.file-bubble.media .thumb-wrap {
+  position: relative;
+  cursor: zoom-in;
+}
+.file-bubble.media .thumb {
+  display: block;
+  max-width: 240px;
+  max-height: 320px;
+  min-width: 96px;
+  min-height: 96px;
+  object-fit: cover;
+}
+.file-bubble.media .thumb-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 48px;
+  color: #fff;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+  pointer-events: none;
+}
+.file-bubble.media .thumb-caption {
+  /* width:0 + min-width:100%: the caption contributes nothing to the bubble's
+     intrinsic (fit-content) width — a long filename can't widen the bubble past
+     the image — yet lays out stretched to the image width and ellipsizes.
+     Carries its own inset now that the bubble has zero padding. */
+  width: 0;
+  min-width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 8px;
+}
+.file-bubble.media .thumb-caption a {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--flikky-type-body-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-small-tracking);
+}
+.file-bubble.media .thumb-caption .size {
+  font: var(--flikky-type-body-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-small-tracking);
+}
+
+/* ── 灯箱预览 ─────────────────────────────────────────────────────────────── */
+
+/* display:flex outranks the browser's [hidden] rule, so keep this explicit. */
+.lightbox[hidden] {
+  display: none;
+}
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+  /* scrim 与媒体**分两条动效**，档位不同：
+     遮罩只是明暗变化（effects 档），媒体有尺寸变化（spatial 档）。
+     混用一条会让「幕布拉上」和「画面推出」同速，那看起来像整块图片
+     被贴上来 —— 用户原话「过渡太硬，体感上较突然」（2026-09-12）。 */
+  animation: flikky-lightbox-in var(--flikky-spring-effects-default-dur)
+             var(--flikky-spring-effects-default) both;
+}
+@keyframes flikky-lightbox-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.lightbox-media {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  /* 从 96% 推到 100%：幅度刻意小。大幅缩放在全屏尺寸上会显得图片「飞过来」，
+     而这只是一次打开，不是转场。spatial 档（有位移/尺寸变化的都走它）。 */
+  animation: flikky-lightbox-media-in var(--flikky-spring-spatial-default-dur)
+             var(--flikky-spring-spatial-default) both;
+}
+@keyframes flikky-lightbox-media-in {
+  from { opacity: 0; transform: scale(.96); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* 渐进式加载的第二段：缩略图 → 原图那一次替换也要淡，否则
+   「模糊一下变清晰」会是一次硬切，比没有渐进式还突兀。
+   `data-full` 由 openLightbox 在原图 onload 后打上。 */
+.lightbox-media[data-full='1'] {
+  animation: flikky-lightbox-sharpen var(--flikky-spring-effects-default-dur)
+             var(--flikky-spring-effects-default) both;
+}
+@keyframes flikky-lightbox-sharpen {
+  from { opacity: .72; }
+  to   { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lightbox,
+  .lightbox-media,
+  .lightbox-media[data-full='1'] { animation: none; }
+}
+.lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: none;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  padding: 8px;
+}
+.lightbox-close .material-symbols-outlined {
+  font-size: 28px;
+}
+
+/* ── 消息动作栏 ──────────────────────────────────────────────────────────── */
+
+/* v1.17.0 §12 message actions. One DOM node (.msg-actions inside each
+   .bubble-row), two CSS presentations switched by body[data-action-style] —
+   style changes from the phone apply instantly with zero re-render.
+   Buttons are plain <button> elements (not mdui-button-icon: its --shape-corner
+   is an unregistered custom property, so a press-morph transition on it cannot
+   interpolate — same defect class as the FAB, see Task 4a) sized to the App's
+   CircleActionButton (36dp circle / 22dp icon / secondary-container). */
+.msg-actions {
+  display: flex;
+  gap: var(--flikky-space-sm);
+  align-items: center;
+}
+.msg-actions button {
+  position: relative;
+  overflow: hidden;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: var(--flikky-morph-round);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  background: rgb(var(--mdui-color-secondary-container));
+  color: rgb(var(--mdui-color-on-secondary-container));
+  transition:
+    background-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default);
+}
+.msg-actions button:active {
+  border-radius: var(--flikky-morph-round-pressed);
+  transition: border-radius var(--flikky-morph-press-dur) var(--flikky-morph-press-ease);
+}
+.msg-actions button::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--flikky-spring-effects-fast-dur) var(--flikky-spring-effects-fast);
+}
+.msg-actions button:hover::before {
+  opacity: .08;
+}
+.msg-actions button:active::before {
+  opacity: .12;
+}
+.msg-actions .material-symbols-outlined {
+  font-size: 22px;
+  position: relative;
+}
+/* danger（撤回）：局部把 secondary-container 令牌重映射到 error-container——
+   button 的 background/color 读的就是这两个 token，重映射后原样生效，不需要
+   单独的 .danger 背景规则。 */
+.msg-actions button.danger {
+  --mdui-color-secondary-container: var(--mdui-color-error-container);
+  --mdui-color-on-secondary-container: var(--mdui-color-on-error-container);
+}
+
+/* INLINE：常驻行，flex-basis:100% 换行到气泡下方，贴着自己这条气泡（上方 2px），
+   与下一条消息的间距由 .bubble-row:has(.msg-actions) 的加宽下边距负责，不是自己
+   撑出来的。padding-inline-* = 头像 36px + 行内 gap 8px，对齐气泡边缘
+   （对齐 App 的 MessageActionBar）。 */
+body[data-action-style="INLINE"] .msg-actions {
+  flex-basis: 100%;
+  margin-top: 2px;
+}
+body[data-action-style="INLINE"] .bubble-row.them .msg-actions {
+  padding-inline-start: calc(36px + var(--flikky-space-sm));
+}
+body[data-action-style="INLINE"] .bubble-row.me .msg-actions {
+  justify-content: flex-end;
+  padding-inline-end: calc(36px + var(--flikky-space-sm));
+}
+body[data-action-style="INLINE"] .bubble-row:has(.msg-actions) {
+  margin-bottom: var(--flikky-space-xl);
+}
+
+/* FLOATING：桌面 hover 浮出，条在气泡旁上缘。opacity+scale 切换保留占位避免
+   hover 抖动；触屏无 hover → 完全隐藏，操作走长按菜单。 */
+body[data-action-style="FLOATING"] .msg-actions {
+  opacity: 0;
+  transform: scale(.85);
+  pointer-events: none;
+  align-self: flex-start;
+  transition:
+    opacity var(--flikky-spring-effects-fast-dur) var(--flikky-spring-effects-fast),
+    transform var(--flikky-spring-spatial-fast-dur) var(--flikky-spring-spatial-fast);
+}
+body[data-action-style="FLOATING"] .bubble-row:hover .msg-actions {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+body.mobile-ua[data-action-style="FLOATING"] .msg-actions {
+  display: none;
+}
+
+/* 经典文件泡整泡可点下载（§12.2 顺手修）。 */
+.file-bubble:not(.media):not(.uploading):not(.transferring):not(.failed) {
+  cursor: pointer;
+}
+
+/* ── 输入坞 + FAB（Task 3 已把这两个类挂进 app.html，这是它们的首次上色） ── */
+
+.fk-dock-row {
+  position: absolute;
+  left: var(--flikky-dock-inset);
+  right: var(--flikky-dock-inset);
+  bottom: var(--flikky-dock-inset);
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: var(--flikky-space-sm);
+  z-index: 2;
+}
+
+/* 单行全圆 ↔ 多行 28px 的旧形变已删除：插值区间几乎全落在肉眼无差别的大半径段，
+   观感就是最后一下突然跳变。坞保持一个恒定圆角。 */
+.fk-dock {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--flikky-space-xs);
+  padding: var(--flikky-space-xs);
+  min-height: var(--flikky-dock-h);
+  border-radius: var(--flikky-shape-xl);
+  background: var(--flikky-dock-bg);
+  /* 焦点指示环。MD3 filled text field 用底部一条 active indicator，但那条线在一个
+     全圆角的坞上读不出来；这里改成整圈描边，同样是「primary 色、聚焦才出现、2dp」。
+     边框常驻但透明：box-sizing 是 border-box，若聚焦时才加边框，内容区会瞬间缩 2px。 */
+  border: var(--flikky-dock-border) solid transparent;
+  transition:
+    background-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    border-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default);
+}
+.fk-dock:focus-within {
+  background: var(--flikky-dock-bg-focus);
+  border-color: rgb(var(--mdui-color-primary));
+}
+.fk-dock-btn {
+  width: var(--flikky-size-touch);
+  height: var(--flikky-size-touch);
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  border-radius: var(--flikky-morph-round);
+  background: transparent;
+  color: rgb(var(--mdui-color-on-surface-variant));
+  transition:
+    background-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default);
+}
+.fk-dock-btn:hover {
+  background: rgba(var(--mdui-color-on-surface), .08);
+}
+.fk-dock-btn:active {
+  border-radius: var(--flikky-morph-round-pressed);
+  transition: border-radius var(--flikky-morph-press-dur) var(--flikky-morph-press-ease);
+}
+.fk-dock-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 120px;
+  padding: 12px 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: rgb(var(--mdui-color-on-surface));
+  font: var(--flikky-type-body-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-large-tracking);
+}
+.fk-dock-input::placeholder {
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+#send-btn {
+  width: var(--flikky-size-touch);
+  height: var(--flikky-size-touch);
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 50%;
+  background: rgb(var(--mdui-color-primary));
+  color: rgb(var(--mdui-color-on-primary));
+  transition:
+    background-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default);
+}
+#send-btn:active {
+  border-radius: var(--flikky-morph-round-pressed);
+  transition: border-radius var(--flikky-morph-press-dur) var(--flikky-morph-press-ease);
+}
+/* data-ready 由 Task 4 的下一步（app.js，不在本任务范围）按输入框是否有内容切换；
+   这里先把两态的样式立好。 */
+#send-btn[data-ready="false"] {
+  background: rgb(var(--mdui-color-surface-container-highest));
+  color: rgb(var(--mdui-color-on-surface-variant));
+  cursor: default;
+}
+
+/* 静止是圆角正方形，按下更圆——圆的变方、方的变圆，两者朝对立形状走。
+   用原生 border-radius 而不是 mdui 的 --shape-corner-normal：未注册的自定义属性
+   不可插值，transition 上去只会在时长结束时突跳一下，形变根本不发生。
+   （本仓库唯一注册过的自定义属性是 base.css:22 的 --flikky-icon-fill。）
+   官方 mdui-fab 做不出这个效果，所以这里照原型用普通 button 自绘。 */
+.fk-fab {
+  position: relative;
+  overflow: hidden;
+  flex: none;
+  /* 与输入坞单行等高（同一个 token 算出来），两者不再一高一低。 */
+  width: var(--flikky-dock-h);
+  height: var(--flikky-dock-h);
+  min-width: 0;
+  border: 0;
+  border-radius: var(--flikky-morph-sq);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  background: rgb(var(--mdui-color-primary-container));
+  color: rgb(var(--mdui-color-on-primary-container));
+  box-shadow: var(--flikky-raised-shadow);
+  visibility: visible;
+  transition:
+    box-shadow var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    background-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default),
+    width var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default),
+    margin-left var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default),
+    opacity var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    visibility 0s;
+}
+.fk-fab:active {
+  border-radius: var(--flikky-morph-sq-pressed);
+  transition: border-radius var(--flikky-morph-press-dur) var(--flikky-morph-press-ease);
+}
+/* 官方 hover 8% / pressed 12% state layer */
+.fk-fab::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--flikky-spring-effects-fast-dur) var(--flikky-spring-effects-fast);
+}
+.fk-fab:hover::before { opacity: .08; }
+.fk-fab:active::before { opacity: .12; }
+.fk-fab:hover { box-shadow: 0 2px 6px rgba(0, 0, 0, .12), 0 6px 14px rgba(0, 0, 0, .08); }
+.fk-fab .material-symbols-outlined { position: relative; }
+/* ── FAB 的显隐：宽度塌陷，而不是 display:none ──
+ * 输入坞是 .fk-dock-row 里 flex:1 1 auto 的兄弟。用 display:none 切换时坞的宽度
+ * 是一次突变，看起来很硬。让 FAB 的宽度可插值，坞就跟着连续伸缩 —— 这才是用户
+ * 要的那个「衔接过渡」，而且顺带就是 FAB 自己的出现/退场动画，不需要另一套 keyframes。
+ * 注意这里刻意不写 display:none：写了宽度就没得动画。 */
+.fk-fab[hidden] {
+  width: 0;
+  padding: 0;
+  opacity: 0;
+  box-shadow: none;
+  /* 抵掉 .fk-dock-row 的 gap，否则宽度塌到 0 之后右边还留 8px 空档 */
+  margin-left: calc(-1 * var(--flikky-space-sm));
+  /* 宽度动画走完再从可聚焦树与无障碍树里摘掉。visibility 不可插值，用
+     `0s + delay` 表达「到点切换」—— 少了这条，一个宽度为 0 的 FAB 仍然能被
+     Tab 聚焦，因为我们上面刻意没有 display:none。 */
+  visibility: hidden;
+  transition:
+    width var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default),
+    margin-left var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default),
+    opacity var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    box-shadow var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    visibility 0s linear var(--flikky-spring-spatial-default-dur);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fk-fab,
+  .fk-fab[hidden] { transition: none; }
+}
+
+/* ── 保存全部：自绘 FAB 菜单（用户点名保留原型这版视觉，不换 mdui-menu）───── */
+
+.fk-fab-menu {
+  position: absolute;
+  right: var(--flikky-dock-inset);
+  /* 贴在 FAB 上方。由 FAB 的实际高度算出来，改 --flikky-dock-h 时不会脱钩。 */
+  bottom: calc(var(--flikky-dock-inset) + var(--flikky-dock-h) + var(--flikky-space-md));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--flikky-space-sm);
+  z-index: 20;
+}
+.fk-fab-menu[hidden] { display: none; }
+
+.fk-fab-menu-item {
+  position: relative;
+  overflow: hidden;
+  border: 0;
+  height: 44px;
+  padding: 0 var(--flikky-space-lg);
+  /* 静态药丸形，不参与形变动画——「半径别写 999px」那条规则只约束会插值的半径。 */
+  border-radius: 999px;
+  background: rgb(var(--mdui-color-primary-container));
+  color: rgb(var(--mdui-color-on-primary-container));
+  box-shadow: var(--flikky-raised-shadow);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--flikky-space-sm);
+  font: var(--flikky-type-label-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-large-tracking);
+  white-space: nowrap;
+  animation: flikky-fab-item-in var(--flikky-spring-spatial-default-dur)
+             var(--flikky-spring-spatial-default) both;
+  animation-delay: calc(var(--flikky-stagger) * var(--i, 0));
+}
+.fk-fab-menu-item::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--flikky-spring-effects-fast-dur) var(--flikky-spring-effects-fast);
+}
+.fk-fab-menu-item:hover::before { opacity: .08; }
+.fk-fab-menu-item:active::before { opacity: .12; }
+.fk-fab-menu-item > * { position: relative; }
+
+@keyframes flikky-fab-item-in {
+  from { opacity: 0; transform: translateY(12px) scale(.9); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fk-fab-menu-item { animation-duration: 0ms; }
+}
+
+/* ── 移动端（<840px，与 shell.css 的断点统一，取代旧版分裂的 600px/480px） ── */
+
+@media (max-width: 839px) {
+  .header-peer-name {
+    max-width: none;
+  }
+  .file-bubble.media .thumb {
+    max-width: calc(100vw - 120px);
+  }
+
+  /* 绝对定位元素的 bottom 相对 padding box 解析，父级的 padding-bottom 对它无效——
+     所以输入坞、FAB 菜单、列表底部留白都得自己让开固定导航栏（含安全区）。 */
+  .fk-dock-row {
+    bottom: calc(var(--flikky-dock-inset) + var(--flikky-navbar-h) + env(safe-area-inset-bottom, 0px));
+  }
+  .fk-fab-menu {
+    bottom: calc(var(--flikky-dock-inset) + var(--flikky-navbar-h) + env(safe-area-inset-bottom, 0px) + 68px);
+  }
+  .chat-list {
+    padding-bottom: calc(var(--flikky-dock-inset) * 2 + 64px + var(--flikky-navbar-h) + env(safe-area-inset-bottom, 0px));
+  }
+}

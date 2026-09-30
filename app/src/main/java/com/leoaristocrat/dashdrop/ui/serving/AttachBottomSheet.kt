@@ -1,0 +1,128 @@
+package com.leoaristocrat.dashdrop.ui.serving
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Text
+import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.Tab
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.leoaristocrat.dashdrop.R
+import com.leoaristocrat.dashdrop.data.db.FileOverviewRow
+import com.leoaristocrat.dashdrop.ui.components.OptionCard
+import com.leoaristocrat.dashdrop.ui.theme.Spacing
+import com.leoaristocrat.dashdrop.util.AppEntry
+
+/**
+ * One attachment sheet for system pickers and previously transferred files.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AttachBottomSheet(
+    existingFiles: List<FileOverviewRow>,
+    installedApps: List<AppEntry>,
+    appsLoading: Boolean,
+    onSendExistingFile: (FileOverviewRow) -> Unit,
+    onSendApp: (AppEntry) -> Unit,
+    onRefreshApps: () -> Unit,
+    onPickFile: () -> Unit,
+    onPickImage: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    val tabState = rememberSaveableStateHolder()
+    // Observe the host Activity outside the dialog's own lifecycle owner.
+    if (selectedTab == 1) RefreshAppsOnResume(onRefreshApps)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
+    ) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.65f)) {
+            SecondaryTabRow(selectedTabIndex = selectedTab) {
+                listOf(R.string.attach_title, R.string.apps_title, R.string.files_quick_title).forEachIndexed { index, label ->
+                    Tab(
+                        selected = selectedTab == index,
+                        onClick = { selectedTab = index },
+                        text = { Text(stringResource(label)) },
+                    )
+                }
+            }
+            Box(Modifier.weight(1f).padding(top = Spacing.lg)) {
+                tabState.SaveableStateProvider(selectedTab) {
+                    when (selectedTab) {
+                    1 -> {
+                        AppPickerContent(installedApps, appsLoading, onSendApp)
+                    }
+                    2 -> ExistingFilesContent(rows = existingFiles, onSend = onSendExistingFile)
+                    else -> {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = Spacing.screenEdge)
+                                .padding(bottom = Spacing.xxxl),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(Spacing.md),
+                            ) {
+                                OptionCard(
+                                    iconRes = R.drawable.ic_attach_file,
+                                    label = stringResource(R.string.attach_file),
+                                    onClick = onPickFile,
+                                    modifier = Modifier.weight(1f),
+                                    description = stringResource(R.string.attach_file_summary),
+                                )
+                                OptionCard(
+                                    iconRes = R.drawable.ic_image,
+                                    label = stringResource(R.string.attach_image),
+                                    onClick = onPickImage,
+                                    modifier = Modifier.weight(1f),
+                                    description = stringResource(R.string.attach_image_summary),
+                                )
+                            }
+                        }
+                    }}
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RefreshAppsOnResume(onRefresh: () -> Unit) {
+    val owner = LocalLifecycleOwner.current
+    val refresh by rememberUpdatedState(onRefresh)
+    DisposableEffect(owner) {
+        // Registering on an already resumed owner also delivers ON_RESUME,
+        // so entering this tab and returning from permission settings both scan.
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) refresh()
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+}

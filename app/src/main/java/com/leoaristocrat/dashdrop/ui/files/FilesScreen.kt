@@ -1,0 +1,1014 @@
+package com.leoaristocrat.dashdrop.ui.files
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MenuDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedListItem
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.leoaristocrat.dashdrop.R
+import com.leoaristocrat.dashdrop.data.db.FileOverviewRow
+import com.leoaristocrat.dashdrop.data.settings.DashDropSettings
+import com.leoaristocrat.dashdrop.di.ServiceLocator
+import com.leoaristocrat.dashdrop.session.Message
+import com.leoaristocrat.dashdrop.session.Origin
+import com.leoaristocrat.dashdrop.ui.components.ConfirmDialog
+import com.leoaristocrat.dashdrop.ui.components.EmptyStateContent
+import com.leoaristocrat.dashdrop.ui.components.FileLeadingSpec
+import com.leoaristocrat.dashdrop.ui.components.FileLeadingVisual
+import com.leoaristocrat.dashdrop.ui.components.DashDropFloatingToolbar
+import com.leoaristocrat.dashdrop.ui.components.DashDropFloatingToolbarLift
+import com.leoaristocrat.dashdrop.ui.components.DashDropSelectingToolbarOverlay
+import com.leoaristocrat.dashdrop.ui.components.ImagePreviewDialog
+import com.leoaristocrat.dashdrop.ui.components.SortMenuAction
+import com.leoaristocrat.dashdrop.ui.components.dashdropItemAnimation
+import com.leoaristocrat.dashdrop.util.formatBytes
+import com.leoaristocrat.dashdrop.ui.components.maxContentWidth
+import com.leoaristocrat.dashdrop.ui.components.openStoredFile
+import com.leoaristocrat.dashdrop.ui.components.installApk
+import com.leoaristocrat.dashdrop.ui.components.saveToGallery
+import com.leoaristocrat.dashdrop.ui.components.sessionFile
+import com.leoaristocrat.dashdrop.ui.components.StoredShareItem
+import com.leoaristocrat.dashdrop.ui.components.StoredVideo
+import com.leoaristocrat.dashdrop.ui.components.shareStoredFile
+import com.leoaristocrat.dashdrop.ui.components.shareStoredFiles
+import com.leoaristocrat.dashdrop.ui.components.selectionToggle
+import com.leoaristocrat.dashdrop.ui.favorites.FavoriteGroupPickerSheet
+import com.leoaristocrat.dashdrop.ui.theme.Motion
+import com.leoaristocrat.dashdrop.ui.theme.Spacing
+import java.io.File
+import java.text.DateFormat
+import java.util.Date
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+internal class CreateDocumentDynamicMime :
+    ActivityResultContract<Pair<String, String>, Uri?>() {
+    override fun createIntent(context: Context, input: Pair<String, String>): Intent =
+        Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = input.first
+            putExtra(Intent.EXTRA_TITLE, input.second)
+        }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Uri? =
+        intent?.data.takeIf { resultCode == Activity.RESULT_OK }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun FilesScreen(
+    onBack: () -> Unit,
+    onOpenMessage: (sessionId: Long, messageId: Long) -> Unit,
+    viewModel: FilesViewModel = viewModel(),
+) {
+    val context = LocalContext.current
+    val rows by viewModel.rows.collectAsState()
+    val stats by viewModel.stats.collectAsState()
+    val category by viewModel.category.collectAsState()
+    val query by viewModel.query.collectAsState()
+    val sort by viewModel.sort.collectAsState()
+    val selection by viewModel.selection.collectAsState()
+    val selecting by viewModel.selecting.collectAsState()
+    val settings by ServiceLocator.settingsRepository.settings
+        .collectAsState(initial = DashDropSettings())
+    val favoriteGroups by ServiceLocator.favoritesRepository.observeGroups()
+        .collectAsState(initial = emptyList())
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    var searchActive by rememberSaveable { mutableStateOf(false) }
+    var sortExpanded by remember { mutableStateOf(false) }
+    // 收藏 sheet / 删除确认框的目标行：工具栏批量入口传 selectedRows，行内 ⋮ 传单行。
+    var favoriteTargets by remember { mutableStateOf<List<FileOverviewRow>?>(null) }
+    var deleteTargets by remember { mutableStateOf<List<FileOverviewRow>?>(null) }
+    var saveTarget by remember { mutableStateOf<FileOverviewRow?>(null) }
+    var previewImage by remember { mutableStateOf<File?>(null) }
+    val focusRequester = remember { FocusRequester() }
+    val selectedIds = selection.orEmpty()
+    val selectedRows = remember(rows, selectedIds) {
+        rows.filter { it.messageId in selectedIds }
+    }
+    val availableIds = remember(rows) { rows.map { it.messageId } }
+    val selectionToggleState = remember(availableIds, selectedIds) {
+        selectionToggle(availableIds, selectedIds)
+    }
+    val deletableRows = selectedRows.filter { it.sessionEndedAt != null }
+    // 多选浮动工具栏可见时，snackbar 与列表底部都要为它让位（共用同一抬升量）。
+    val toolbarLift by animateDpAsState(
+        targetValue = if (selecting) DashDropFloatingToolbarLift else 0.dp,
+        animationSpec = Motion.effects(),
+        label = "filesToolbarLift",
+    )
+    fun closeSearch() {
+        searchActive = false
+        viewModel.setQuery("")
+    }
+
+    fun openOrPreview(row: FileOverviewRow) {
+        val file = sessionFile(row.sessionId, row.fileId)
+        if (FilesListBuilder.categoryOf(row.fileMime) == FileCategory.IMAGE && file.exists()) {
+            previewImage = file
+        } else {
+            openStoredFile(
+                context = context,
+                sessionId = row.sessionId,
+                fileId = row.fileId,
+                displayName = row.fileName ?: row.fileId,
+                mime = row.fileMime,
+                onMissing = { viewModel.markMissing(row.messageId) },
+            )
+        }
+    }
+
+    val saveLauncher = rememberLauncherForActivityResult(
+        CreateDocumentDynamicMime(),
+    ) { uri ->
+        val target = saveTarget
+        saveTarget = null
+        if (uri != null && target != null) {
+            scope.launch {
+                val saved = withContext(Dispatchers.IO) {
+                    runCatching {
+                        requireNotNull(context.contentResolver.openOutputStream(uri)).use { output ->
+                            sessionFile(target.sessionId, target.fileId)
+                                .inputStream()
+                                .use { input -> input.copyTo(output) }
+                        }
+                    }.isSuccess
+                }
+                snackbarHostState.showSnackbar(
+                    context.getString(
+                        if (saved) R.string.files_save_done else R.string.files_save_failed,
+                    ),
+                )
+            }
+        }
+    }
+
+    var treeSaveTargets by remember { mutableStateOf<List<FileOverviewRow>>(emptyList()) }
+    val saveTreeLauncher = rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        val targets = treeSaveTargets
+        treeSaveTargets = emptyList()
+        if (treeUri != null && targets.isNotEmpty()) {
+            scope.launch {
+                val saved = withContext(Dispatchers.IO) {
+                    saveRowsToTree(context, treeUri, targets)
+                }
+                snackbarHostState.showSnackbar(
+                    if (saved == targets.size) {
+                        context.getString(R.string.files_save_batch_done, saved)
+                    } else {
+                        context.getString(
+                            R.string.files_save_batch_partial, saved, targets.size,
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun runRowAction(row: FileOverviewRow, action: RowAction) {
+        when (action) {
+            RowAction.INSTALL -> installApk(context, sessionFile(row.sessionId, row.fileId), row.fileName ?: "app.apk")
+            RowAction.FAVORITE -> favoriteTargets = listOf(row)
+            RowAction.SHARE -> shareStoredFile(
+                context,
+                row.sessionId,
+                row.fileId,
+                row.fileName ?: row.fileId,
+                row.fileMime,
+            )
+            RowAction.GALLERY -> scope.launch {
+                val saved = withContext(Dispatchers.IO) {
+                    saveToGallery(
+                        context,
+                        sessionFile(row.sessionId, row.fileId),
+                        row.fileName ?: row.fileId,
+                        row.fileMime.orEmpty(),
+                    )
+                }
+                snackbarHostState.showSnackbar(
+                    context.getString(
+                        if (saved) R.string.files_gallery_done else R.string.files_gallery_failed,
+                    ),
+                )
+            }
+            RowAction.SAVE_AS -> {
+                saveTarget = row
+                saveLauncher.launch(
+                    (row.fileMime ?: "application/octet-stream") to
+                        (row.fileName ?: row.fileId),
+                )
+            }
+            RowAction.OPEN_IN_SESSION -> onOpenMessage(row.sessionId, row.messageId)
+            RowAction.DELETE -> deleteTargets = listOf(row)
+        }
+    }
+
+    BackHandler(enabled = searchActive && !selecting) { closeSearch() }
+    BackHandler(enabled = selecting) { viewModel.exitSelecting() }
+    LaunchedEffect(searchActive) {
+        if (searchActive) focusRequester.requestFocus()
+    }
+
+    Scaffold(
+        snackbarHost = {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier.padding(bottom = toolbarLift),
+            )
+        },
+        topBar = {
+            if (selecting) {
+                TopAppBar(
+                    title = {
+                        Text(stringResource(R.string.files_selected_count, selectedIds.size))
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = viewModel::exitSelecting) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = stringResource(R.string.home_close),
+                            )
+                        }
+                    },
+                    actions = {
+                        IconButton(
+                            onClick = { viewModel.selectAll(selectionToggleState.targetIds.toList()) },
+                            enabled = rows.isNotEmpty(),
+                        ) {
+                            Icon(
+                                painterResource(
+                                    if (selectionToggleState.allSelected) {
+                                        R.drawable.ic_deselect
+                                    } else {
+                                        R.drawable.ic_select_all
+                                    },
+                                ),
+                                contentDescription = stringResource(
+                                    if (selectionToggleState.allSelected) {
+                                        R.string.home_deselect
+                                    } else {
+                                        R.string.home_select_all
+                                    },
+                                ),
+                            )
+                        }
+                    },
+                )
+            } else if (searchActive) {
+                TopAppBar(
+                    title = {
+                        OutlinedTextField(
+                            value = query,
+                            onValueChange = viewModel::setQuery,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(focusRequester),
+                            placeholder = { Text(stringResource(R.string.files_search_hint)) },
+                            trailingIcon = {
+                                if (query.isNotEmpty()) {
+                                    IconButton(onClick = { viewModel.setQuery("") }) {
+                                        Icon(
+                                            Icons.Filled.Close,
+                                            contentDescription = stringResource(R.string.home_search_clear),
+                                        )
+                                    }
+                                } else {
+                                    Icon(Icons.Filled.Search, contentDescription = null)
+                                }
+                            },
+                            singleLine = true,
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = ::closeSearch) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = stringResource(R.string.history_back),
+                            )
+                        }
+                    },
+                    actions = {
+                        SortMenuAction(
+                            spec = sort,
+                            timeLabel = R.string.files_sort_time,
+                            expanded = sortExpanded,
+                            onExpandedChange = { sortExpanded = it },
+                            onPick = viewModel::setSort,
+                        )
+                    },
+                )
+            } else {
+                TopAppBar(
+                    title = { Text(stringResource(R.string.files_title)) },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = stringResource(R.string.history_back),
+                            )
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { searchActive = true }) {
+                            Icon(
+                                Icons.Filled.Search,
+                                contentDescription = stringResource(R.string.files_search_hint),
+                            )
+                        }
+                        SortMenuAction(
+                            spec = sort,
+                            timeLabel = R.string.files_sort_time,
+                            expanded = sortExpanded,
+                            onExpandedChange = { sortExpanded = it },
+                            onPick = viewModel::setSort,
+                        )
+                    },
+                )
+            }
+        },
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .padding(innerPadding)
+                .fillMaxSize(),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            Column(
+                modifier = Modifier
+                    .maxContentWidth()
+                    .fillMaxSize(),
+            ) {
+                Text(
+                    text = stringResource(
+                        R.string.files_stats,
+                        stats.count,
+                        formatBytes(stats.totalBytes),
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(
+                        horizontal = Spacing.screenEdge,
+                        vertical = Spacing.sm,
+                    ),
+                )
+                // chip 行显隐动画（与传输页/收藏页一致）：MutableTransitionState 从 false 起步，
+                // 进入/退出多选时播 expand/shrink 过渡，不做硬切。
+                val chipVisible = remember { MutableTransitionState(false) }
+                chipVisible.targetState = !selecting
+                AnimatedVisibility(visibleState = chipVisible) {
+                    FileCategoryChips(
+                        selected = category,
+                        onSelected = viewModel::setCategory,
+                    )
+                }
+                if (rows.isEmpty()) {
+                    if (query.isEmpty() && category == FileCategory.ALL) {
+                        EmptyStateContent(
+                            title = stringResource(R.string.files_empty_title),
+                            description = stringResource(R.string.files_empty_desc),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = stringResource(R.string.files_empty_title),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentPadding = PaddingValues(
+                            top = Spacing.sm,
+                            bottom = Spacing.xxl + toolbarLift,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(Spacing.xs),
+                    ) {
+                        itemsIndexed(rows, key = { _, row -> row.messageId }) { index, row ->
+                            FileOverviewItem(
+                                row = row,
+                                index = index,
+                                count = rows.size,
+                                selecting = selecting,
+                                selected = row.messageId in selectedIds,
+                                modifier = dashdropItemAnimation(),
+                                favoritesEnabled = settings.favoriteBetaEnabled,
+                                onNormalClick = { openOrPreview(row) },
+                                onThumbnailClick = {
+                                    viewModel.toggleSelection(row.messageId)
+                                },
+                                onMenuAction = { action -> runRowAction(row, action) },
+                                onEnterSelecting = {
+                                    viewModel.toggleSelection(row.messageId)
+                                },
+                                onToggleSelection = {
+                                    viewModel.toggleSelection(row.messageId)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
+            DashDropSelectingToolbarOverlay(
+                visible = selecting,
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                DashDropFloatingToolbar {
+                    if (settings.favoriteBetaEnabled) {
+                        IconButton(
+                            onClick = { favoriteTargets = selectedRows },
+                            enabled = selectedRows.isNotEmpty(),
+                        ) {
+                            Icon(
+                                painterResource(R.drawable.ic_star_border),
+                                contentDescription = stringResource(R.string.files_action_favorite),
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = {
+                            val single = selectedRows.singleOrNull()
+                            if (single != null) {
+                                shareStoredFile(
+                                    context,
+                                    single.sessionId,
+                                    single.fileId,
+                                    single.fileName ?: single.fileId,
+                                    single.fileMime,
+                                )
+                            } else {
+                                shareStoredFiles(
+                                    context,
+                                    selectedRows.map {
+                                        StoredShareItem(
+                                            it.sessionId,
+                                            it.fileId,
+                                            it.fileName ?: it.fileId,
+                                        )
+                                    },
+                                    FileActionPolicy.batchShareMime(
+                                        selectedRows.map { it.fileMime },
+                                    ),
+                                )
+                            }
+                        },
+                        enabled = selectedRows.isNotEmpty(),
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_share),
+                            contentDescription = stringResource(R.string.files_action_share),
+                        )
+                    }
+                    val mediaSelected = selectedRows.filter {
+                        FilesListBuilder.isMedia(it.fileMime)
+                    }
+                    IconButton(
+                        onClick = {
+                            val media = mediaSelected
+                            val skipped = selectedRows.size - media.size
+                            scope.launch {
+                                var saved = 0
+                                withContext(Dispatchers.IO) {
+                                    media.forEach { row ->
+                                        val ok = saveToGallery(
+                                            context,
+                                            sessionFile(row.sessionId, row.fileId),
+                                            row.fileName ?: row.fileId,
+                                            row.fileMime.orEmpty(),
+                                        )
+                                        if (ok) saved += 1
+                                    }
+                                }
+                                val base = if (saved == media.size) {
+                                    context.getString(R.string.files_gallery_done_count, saved)
+                                } else {
+                                    context.getString(
+                                        R.string.files_gallery_partial, saved, media.size,
+                                    )
+                                }
+                                val message = if (skipped > 0) {
+                                    base + context.getString(
+                                        R.string.files_gallery_skipped_suffix, skipped,
+                                    )
+                                } else {
+                                    base
+                                }
+                                snackbarHostState.showSnackbar(message)
+                            }
+                        },
+                        enabled = mediaSelected.isNotEmpty(),
+                    ) {
+                        Icon(
+                            // 图标语义与消息操作栏统一：file_download=存相册。
+                            painterResource(R.drawable.ic_file_download),
+                            contentDescription = stringResource(R.string.files_action_gallery),
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            val single = selectedRows.singleOrNull()
+                            if (single != null) {
+                                saveTarget = single
+                                saveLauncher.launch(
+                                    (single.fileMime ?: "application/octet-stream") to
+                                        (single.fileName ?: single.fileId),
+                                )
+                            } else {
+                                treeSaveTargets = selectedRows
+                                saveTreeLauncher.launch(null)
+                            }
+                        },
+                        enabled = selectedRows.isNotEmpty(),
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_save),
+                            contentDescription = stringResource(R.string.files_action_save_as),
+                        )
+                    }
+                    IconButton(
+                        onClick = { deleteTargets = selectedRows },
+                        enabled = deletableRows.isNotEmpty(),
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_delete),
+                            contentDescription = stringResource(R.string.files_action_delete),
+                            tint = if (deletableRows.isNotEmpty()) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                LocalContentColor.current
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    favoriteTargets?.let { targets ->
+        FavoriteGroupPickerSheet(
+            groups = favoriteGroups,
+            onSelect = { groupId ->
+                favoriteTargets = null
+                scope.launch {
+                    targets.forEach { row ->
+                        runCatching {
+                            ServiceLocator.favoritesRepository.favoriteFile(
+                                row.sessionId,
+                                row.sessionName,
+                                row.toFileMessage(),
+                                groupId,
+                            )
+                        }
+                    }
+                    snackbarHostState.showSnackbar(
+                        context.getString(R.string.files_favorite_done),
+                    )
+                    viewModel.exitSelecting()
+                }
+            },
+            onCreateGroup = { name ->
+                favoriteTargets = null
+                scope.launch {
+                    val groupId = ServiceLocator.favoritesRepository.createGroup(name)
+                    targets.forEach { row ->
+                        runCatching {
+                            ServiceLocator.favoritesRepository.favoriteFile(
+                                row.sessionId,
+                                row.sessionName,
+                                row.toFileMessage(),
+                                groupId,
+                            )
+                        }
+                    }
+                    snackbarHostState.showSnackbar(
+                        context.getString(R.string.files_favorite_done),
+                    )
+                    viewModel.exitSelecting()
+                }
+            },
+            onDismiss = { favoriteTargets = null },
+        )
+    }
+
+    deleteTargets?.let { targets ->
+        val deletable = targets.filter { it.sessionEndedAt != null }
+        val selectedSize = deletable.sumOf { it.fileSize ?: 0L }
+        val hasActive = targets.any { it.sessionEndedAt == null }
+        val message = if (targets.size == 1) {
+            context.getString(R.string.files_delete_text_single, formatBytes(selectedSize))
+        } else {
+            context.getString(R.string.files_delete_text_batch, formatBytes(selectedSize))
+        } + if (hasActive) {
+            "\n\n${context.getString(R.string.files_delete_in_progress_hint)}"
+        } else {
+            ""
+        }
+        ConfirmDialog(
+            title = if (targets.size == 1) {
+                stringResource(R.string.files_delete_title)
+            } else {
+                stringResource(R.string.files_delete_title_batch, targets.size)
+            },
+            text = message,
+            confirmLabel = stringResource(R.string.files_action_delete),
+            danger = true,
+            onConfirm = {
+                deleteTargets = null
+                scope.launch {
+                    val (deleted, requested) = viewModel.deleteRows(targets)
+                    snackbarHostState.showSnackbar(
+                        if (deleted == requested) {
+                            context.getString(
+                                R.string.files_delete_done,
+                                formatBytes(selectedSize),
+                            )
+                        } else {
+                            context.getString(
+                                R.string.files_delete_partial,
+                                deleted,
+                                requested,
+                            )
+                        },
+                    )
+                }
+            },
+            onDismiss = { deleteTargets = null },
+        )
+    }
+
+    previewImage?.let { file ->
+        ImagePreviewDialog(model = file, onDismiss = { previewImage = null })
+    }
+}
+
+@Composable
+private fun FileCategoryChips(
+    selected: FileCategory,
+    onSelected: (FileCategory) -> Unit,
+) {
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = Spacing.screenEdge),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+    ) {
+        items(FileCategory.entries, key = { it.name }) { category ->
+            val isSelected = category == selected
+            FilterChip(
+                selected = isSelected,
+                onClick = { onSelected(category) },
+                label = { Text(stringResource(category.labelResource())) },
+                leadingIcon = if (isSelected) {
+                    {
+                        Icon(
+                            Icons.Filled.Done,
+                            contentDescription = null,
+                            modifier = Modifier.size(FilterChipDefaults.IconSize),
+                        )
+                    }
+                } else {
+                    null
+                },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun FileOverviewItem(
+    row: FileOverviewRow,
+    index: Int,
+    count: Int,
+    selecting: Boolean,
+    selected: Boolean,
+    favoritesEnabled: Boolean,
+    onNormalClick: () -> Unit,
+    onThumbnailClick: () -> Unit,
+    onMenuAction: (RowAction) -> Unit,
+    onEnterSelecting: () -> Unit,
+    onToggleSelection: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val category = FilesListBuilder.categoryOf(row.fileMime)
+    val haptic = LocalHapticFeedback.current
+    val selectedDescription = stringResource(R.string.home_selected)
+    val notSelectedDescription = stringResource(R.string.home_not_selected)
+    val direction = stringResource(
+        if (row.origin == "BROWSER") {
+            R.string.files_direction_received
+        } else {
+            R.string.files_direction_sent
+        },
+    )
+    // 不含会话名：单行副标题放不下四段，会话名最长且可从会话上下文获知，优先保大小/日期可见。
+    val subtitle = listOf(
+        direction,
+        formatBytes(row.fileSize ?: 0L),
+        formatFileDate(row.timestamp),
+    ).joinToString(" · ")
+
+    val shapes = ListItemDefaults.segmentedShapes(index = index, count = count)
+    val colors = ListItemDefaults.segmentedColors(
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        supportingContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        leadingContentColor = MaterialTheme.colorScheme.primary,
+        selectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        selectedSupportingContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        selectedLeadingContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+    )
+    val rowModifier = modifier
+        .fillMaxWidth()
+        .padding(horizontal = Spacing.screenEdge)
+        .then(
+            if (selecting) {
+                Modifier.semantics {
+                    this.selected = selected
+                    stateDescription = if (selected) {
+                        selectedDescription
+                    } else {
+                        notSelectedDescription
+                    }
+                }
+            } else {
+                Modifier
+            },
+        )
+    val selectLabel = stringResource(R.string.files_select_item)
+    // leading 走共用件：媒体行缩略图、非媒体行同占位的圆形图标容器，两者宽度相等才能让 headline 对齐。
+    val leadingVisual: @Composable () -> Unit = {
+        FileLeadingVisual(
+            iconRes = category.iconResource(),
+            mime = row.fileMime,
+            thumbnailModel = if (category == FileCategory.IMAGE || category == FileCategory.VIDEO) {
+                remember(row.sessionId, row.fileId, category) {
+                    val file = sessionFile(row.sessionId, row.fileId)
+                    if (category == FileCategory.VIDEO) StoredVideo(file) else file
+                }
+            } else {
+                null
+            },
+            selected = selected,
+        )
+    }
+    val leading: @Composable () -> Unit = if (selecting) {
+        leadingVisual
+    } else {
+        {
+            Box(
+                modifier = Modifier.clickable(onClickLabel = selectLabel) { onThumbnailClick() },
+            ) {
+                leadingVisual()
+            }
+        }
+    }
+    val supporting: @Composable () -> Unit = {
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+    val headline: @Composable () -> Unit = {
+        Text(
+            text = row.fileName ?: row.fileId,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+    val menuLabel: @Composable (RowAction) -> String = { action ->
+        stringResource(
+            when (action) {
+                RowAction.INSTALL -> R.string.files_action_install
+                RowAction.FAVORITE -> R.string.files_action_favorite
+                RowAction.SHARE -> R.string.files_action_share
+                RowAction.GALLERY -> R.string.files_action_gallery
+                RowAction.SAVE_AS -> R.string.files_action_save_as
+                RowAction.OPEN_IN_SESSION -> R.string.files_action_open_in_session
+                RowAction.DELETE -> R.string.files_action_delete
+            },
+        )
+    }
+    val menuIcon: (RowAction) -> Int = { action ->
+        when (action) {
+            RowAction.INSTALL -> R.drawable.ic_apk_install
+            RowAction.FAVORITE -> R.drawable.ic_star_border
+            RowAction.SHARE -> R.drawable.ic_share
+            RowAction.GALLERY -> R.drawable.ic_file_download
+            RowAction.SAVE_AS -> R.drawable.ic_save
+            RowAction.OPEN_IN_SESSION -> R.drawable.ic_history
+            RowAction.DELETE -> R.drawable.ic_delete
+        }
+    }
+    val trailing: @Composable () -> Unit = {
+        Box {
+            var menuExpanded by remember { mutableStateOf(false) }
+            IconButton(onClick = { menuExpanded = true }) {
+                Icon(
+                    painterResource(R.drawable.ic_more_vert),
+                    contentDescription = stringResource(R.string.files_more_actions),
+                )
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                FileActionPolicy.rowMenu(
+                    mime = row.fileMime,
+                    sessionEnded = row.sessionEndedAt != null,
+                    favoritesEnabled = favoritesEnabled,
+                ).forEach { entry ->
+                    DropdownMenuItem(
+                        text = { Text(menuLabel(entry.action)) },
+                        leadingIcon = {
+                            Icon(
+                                painterResource(menuIcon(entry.action)),
+                                contentDescription = null,
+                            )
+                        },
+                        colors = if (entry.action == RowAction.DELETE) {
+                            MenuDefaults.itemColors(
+                                textColor = MaterialTheme.colorScheme.error,
+                                leadingIconColor = MaterialTheme.colorScheme.error,
+                            )
+                        } else {
+                            MenuDefaults.itemColors()
+                        },
+                        enabled = entry.enabled,
+                        onClick = {
+                            menuExpanded = false
+                            onMenuAction(entry.action)
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    if (selecting) {
+        SegmentedListItem(
+            selected = selected,
+            onClick = onToggleSelection,
+            shapes = shapes,
+            colors = colors,
+            modifier = rowModifier,
+            verticalAlignment = FileLeadingSpec.rowAlignment,
+            leadingContent = leading,
+            supportingContent = supporting,
+            content = headline,
+        )
+    } else {
+        SegmentedListItem(
+            onClick = onNormalClick,
+            onLongClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                onEnterSelecting()
+            },
+            shapes = shapes,
+            colors = colors,
+            modifier = rowModifier,
+            verticalAlignment = FileLeadingSpec.rowAlignment,
+            leadingContent = leading,
+            supportingContent = supporting,
+            content = headline,
+            trailingContent = trailing,
+        )
+    }
+}
+
+private fun formatFileDate(timestamp: Long): String =
+    DateFormat.getDateInstance(DateFormat.SHORT).format(Date(timestamp))
+
+private fun FileOverviewRow.toFileMessage(): Message.File = Message.File(
+    id = messageId,
+    origin = Origin.valueOf(origin),
+    timestamp = timestamp,
+    fileId = fileId,
+    name = fileName ?: fileId,
+    sizeBytes = fileSize ?: 0L,
+    mime = fileMime ?: "",
+    status = Message.File.Status.COMPLETED,
+)
+
+/** Writes stored files to a SAF directory and returns the successful item count. */
+private fun saveRowsToTree(
+    context: Context,
+    treeUri: Uri,
+    rows: List<FileOverviewRow>,
+): Int {
+    val resolver = context.contentResolver
+    val parent = DocumentsContract.buildDocumentUriUsingTree(
+        treeUri,
+        DocumentsContract.getTreeDocumentId(treeUri),
+    )
+    var saved = 0
+    for (row in rows) {
+        val source = sessionFile(row.sessionId, row.fileId)
+        if (!source.exists()) continue
+        val target = runCatching {
+            DocumentsContract.createDocument(
+                resolver,
+                parent,
+                row.fileMime?.ifBlank { null } ?: "application/octet-stream",
+                row.fileName ?: row.fileId,
+            )
+        }.getOrNull() ?: continue
+        val ok = runCatching {
+            requireNotNull(resolver.openOutputStream(target)).use { output ->
+                source.inputStream().use { input -> input.copyTo(output) }
+            }
+        }.isSuccess
+        if (ok) {
+            saved += 1
+        } else {
+            runCatching { DocumentsContract.deleteDocument(resolver, target) }
+        }
+    }
+    return saved
+}

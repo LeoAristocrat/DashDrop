@@ -1,0 +1,156 @@
+package com.leoaristocrat.dashdrop.server.routes
+
+import com.leoaristocrat.dashdrop.server.dto.FavoritesResponseDto
+import io.ktor.http.ContentDisposition
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.call
+import io.ktor.server.response.header
+import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytes
+import io.ktor.server.response.respondOutputStream
+import io.ktor.server.routing.Route
+import io.ktor.server.routing.get
+import java.io.File
+import java.net.URLConnection
+
+/**
+ * 收藏行 id 解析出的落盘文件、下载展示名与服务端记录的 mime。
+ *
+ * 下载仍默认按 octet-stream 下发；mime 只供缩略图与受白名单约束的 inline 响应使用，
+ * 不接受调用方通过 query 参数覆盖。
+ */
+data class FavoriteFileHandle(
+    val file: File,
+    val fileName: String,
+    val mime: String? = null,
+)
+
+/**
+ * v1.19.0: 浏览器端收藏 tab 的只读接口。
+ *
+ * 只接 lambda，不认识 Room / Android —— 数据读取与实体映射都在 service/ 完成。
+ * 两个 endpoint 都走 cookie 统一鉴权；「进 tab 才拉取」，不做 WS 增量推送（YAGNI，见 spec §4.2）。
+ *
+ * [enabled] 是 favoriteBetaEnabled 功能开关的只读探针（beta 关闭是默认态）：鉴权检查之后再判断，
+ * 未鉴权始终先拿 401；鉴权通过但开关关闭时统一回 404（不是 403——不向未授权方暴露"这个功能存在但被禁"）。
+ */
+fun Route.favoriteRoutes(
+    authGate: AuthGate,
+    listProvider: suspend () -> FavoritesResponseDto,
+    fileResolver: suspend (favoriteId: Long) -> FavoriteFileHandle?,
+    enabled: suspend () -> Boolean = { true },
+    favoriteThumbFile: ((Long) -> File)? = null,
+    thumbnailer: ThumbnailGenerator = ThumbnailGenerator { _, _, _ -> false },
+) {
+    fun authed(call: ApplicationCall): Boolean =
+        authGate.isAuthorized(call.request.cookies[AUTH_COOKIE])
+
+    get("/api/favorites") {
+        if (!authed(call)) {
+            call.respond(HttpStatusCode.Unauthorized)
+            return@get
+        }
+        if (!enabled()) {
+            call.respond(HttpStatusCode.NotFound)
+            return@get
+        }
+        call.respond(listProvider())
+    }
+
+    get("/api/favorites/{id}/file") {
+        if (!authed(call)) {
+            call.respond(HttpStatusCode.Unauthorized)
+            return@get
+        }
+        if (!enabled()) {
+            call.respond(HttpStatusCode.NotFound)
+            return@get
+        }
+        // 入参只允许纯数字行 id。真实路径由 service 层用 FavoriteFileStore.resolve 得出，
+        // 用户输入不参与路径拼接 —— 结构上没有 ../ 穿越面。
+        val id = call.parameters["id"]?.toLongOrNull()
+        if (id == null) {
+            call.respond(HttpStatusCode.BadRequest)
+            return@get
+        }
+        val handle = fileResolver(id)
+        if (handle == null || !handle.file.isFile) {
+            call.respond(HttpStatusCode.NotFound)
+            return@get
+        }
+
+        // inline 只对白名单中的服务端 mime 开放（设计 §2.3）。调用方不能通过 query
+        // 选择 Content-Type；白名单外（尤其 SVG）仍按 attachment + octet-stream 下发。
+        val inline = call.request.queryParameters["inline"] == "1" &&
+            handle.mime != null && handle.mime in INLINE_MIME_WHITELIST
+        call.response.header(
+            HttpHeaders.ContentDisposition,
+            (if (inline) ContentDisposition.Inline else ContentDisposition.Attachment)
+                .withParameter(ContentDisposition.Parameters.FileName, handle.fileName)
+                .toString(),
+        )
+        call.response.header(HttpHeaders.ContentLength, handle.file.length().toString())
+        call.respondOutputStream(
+            contentType = if (inline) ContentType.parse(handle.mime!!) else ContentType.Application.OctetStream,
+            status = HttpStatusCode.OK,
+        ) {
+            // 收藏下载不计入 TransferStats：这是设计裁决（收藏是本机存量数据，不是这次会话
+            // 的传输量），不是遗漏——不要在这里补 stats 记录。
+            handle.file.inputStream().use { input ->
+                val buf = ByteArray(64 * 1024)   // 与 FileRoutes 同一 64KB 泵
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    write(buf, 0, n)
+                }
+                flush()
+            }
+        }
+    }
+
+    get("/api/favorites/{id}/thumb") {
+        if (!authed(call)) {
+            call.respond(HttpStatusCode.Unauthorized)
+            return@get
+        }
+        if (!enabled()) {
+            call.respond(HttpStatusCode.NotFound)
+            return@get
+        }
+        val id = call.parameters["id"]?.toLongOrNull()
+        if (id == null) {
+            call.respond(HttpStatusCode.BadRequest)
+            return@get
+        }
+        val handle = fileResolver(id)
+        if (handle == null || !handle.file.isFile) {
+            call.respond(HttpStatusCode.NotFound)
+            return@get
+        }
+        val mime = handle.mime ?: URLConnection.guessContentTypeFromName(handle.fileName)
+        if (mime !in INLINE_MIME_WHITELIST) {
+            call.respond(HttpStatusCode.NotFound)
+            return@get
+        }
+        val target = favoriteThumbFile?.invoke(id) ?: run {
+            call.respond(HttpStatusCode.ServiceUnavailable)
+            return@get
+        }
+        if (target.isFile && target.length() > 0L) {
+            call.respondBytes(target.readBytes(), ContentType.Image.JPEG)
+            return@get
+        }
+        target.delete()
+        val generated = runCatching { thumbnailer.generate(handle.file, mime, target) }
+            .getOrDefault(false)
+        if (!generated || !target.isFile || target.length() == 0L) {
+            target.delete()
+            call.respond(HttpStatusCode.NotFound)
+            return@get
+        }
+        call.respondBytes(target.readBytes(), ContentType.Image.JPEG)
+    }
+}

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" class="mdui-theme-auto">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title data-i18n="login.title">DashDrop sign in</title>
+    <link rel="stylesheet" href="/static/vendor/mdui.css">
+    <link rel="stylesheet" href="/static/base.css">
+    <link rel="stylesheet" href="/static/springs.css">
+    <link rel="stylesheet" href="/static/tokens.css">
+    <link rel="stylesheet" href="/static/pages.css">
+</head>
+<body>
+    <div class="fk-single">
+        <main class="fk-card">
+            <div class="fk-login-brand">
+                <img class="fk-login-logo" src="/static/dashdrop-logo-quick.svg" alt="DashDrop">
+            </div>
+            <p class="fk-login-sub" data-i18n="login.description">Find the 6-digit PIN on your phone.</p>
+
+            <form id="pin-form" autocomplete="off" novalidate>
+                <!-- 6 cells are presentation only; actual input is handled by the transparent input below. -->
+                <div class="fk-pin" id="pin" data-error="false" aria-hidden="true">
+                    <div class="fk-pin-cell" data-filled="false" data-active="true"></div>
+                    <div class="fk-pin-cell" data-filled="false"></div>
+                    <div class="fk-pin-cell" data-filled="false"></div>
+                    <div class="fk-pin-cell" data-filled="false"></div>
+                    <div class="fk-pin-cell" data-filled="false"></div>
+                    <div class="fk-pin-cell" data-filled="false"></div>
+                </div>
+                <input class="fk-pin-input" id="pin-input" type="tel" inputmode="numeric"
+                       maxlength="6" autocomplete="one-time-code" autofocus
+                       aria-label="PIN" data-i18n-aria-label="login.pin_group">
+
+                <div class="fk-helper" id="helper" role="alert" aria-live="assertive"></div>
+                <button class="fk-btn" id="submit-btn" type="submit"
+                        data-i18n="login.submit" disabled>Continue</button>
+            </form>
+        </main>
+    </div>
+
+    <script src="/static/vendor/mdui.global.js"></script>
+    <script src="/static/i18n.js"></script>
+    <script src="/static/login.js"></script>
+</body>
+</html>

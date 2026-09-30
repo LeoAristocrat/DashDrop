@@ -1,0 +1,140 @@
+/* 三个页面（login.html / app.html / export.html）共用的字体、reset 与滚动条默认样式。
+ * 从 app.css 复制而不是搬移 —— app.css 到 Task 8 才整体删除，期间仍被多份测试
+ * 按纯文本读取比对；这份才是真正会被 <head> 加载、渲染出来的版本。 */
+
+/* [hidden] 全局 reset。
+ *
+ * UA 样式表里的 `[hidden]{display:none}` 权重极低——作者样式里任何 `display:` 都压得过它。
+ * 于是给一个 `display:flex` 的元素设 hidden 属性，属性设上了、元素照样画出来。
+ * 本项目为此在 chat.css / pages.css / panels.css / shell.css 里补过 7 处
+ * `.xxx[hidden]{display:none}`，chat.css 那处还留了注释——但没有全局兜底，
+ * 于是每加一个新的可隐藏元素都得重新记得一次。v1.20.0 的「文件」导航入口就是这么漏的：
+ * 主开关关闭时 JS 已把 hidden 设上（firstAvailableDest 因此正确选了收藏），
+ * 而 `.fk-rail-item{display:flex}` 照样把它画在 rail 上（装机验收 Screenshot_1）。
+ *
+ * `!important` 不是偷懒：base.css 在 shell.css **之前**加载，同权重下后写的赢，
+ * 不加 !important 这条 reset 对 `.fk-rail-item{display:flex}` 无效。
+ * **例外靠 `data-hidden-animated` 显式声明，不靠碰巧**：`.fk-fab` 刻意不写 display:none，
+ * 因为它的隐藏态要让宽度可插值（塌缩动画，见 chat.css 那处注释）。这类元素标上
+ * `data-hidden-animated` 从 reset 里摘出去，并**必须自己用 `visibility:hidden`**
+ * 把自己从焦点树与无障碍树里摘掉——否则一个宽度为 0 的按钮仍然能被 Tab 聚焦。
+ *
+ * 守卫见 app/src/test/web/hidden-attribute.test.js。 */
+[hidden]:not([data-hidden-animated]) {
+  display: none !important;
+}
+
+:root {
+  /* 不打包字体文件：只用系统已装字体栈，满足「所有字体离线打包，禁止 CDN」的红线
+   * ——因为这里根本没有下载任何字体，用的是操作系统自带的。 */
+  --flikky-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+@font-face {
+  font-family: 'Material Symbols Outlined';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/static/vendor/material_symbols_outlined.ttf') format('truetype');
+}
+
+/* 可变字体的 FILL 轴要能补间，自定义属性必须先注册类型 —— 否则只会在 0/1 之间跳变，
+   丢掉「图标被填满」的那段过渡（rail/navbar 选中态用它）。 */
+@property --flikky-icon-fill {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── 可选中范围：默认关，内容显式开 ──────────────────────────────────────────
+ * 这是一个应用界面，不是文档。图标、按钮标签、导航项、面板标题、统计数字被选中
+ * 除了误触没有任何用处，而 Material Symbols 的图标**本体就是文本**（连字），
+ * 长按会选出 "arrow_upward" 这种内部标识符——用户实测把它当成消息发出去过。
+ *
+ * 所以取「默认不可选 + 内容白名单」而不是「默认可选 + 逐个图标关掉」：后者要在
+ * 每次新增元素时记得关，漏一个就复现；前者漏一个只是少了一处可复制，量级完全不同。
+ * 白名单在各自的表里（chat.css 气泡、panels.css 收藏行、pages.css 导出摘要）。 */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 输入类控件必须显式开回来。祖先的 user-select:none 在部分引擎里会连输入框内的
+   选词、拖选一起禁掉（编辑本身不受影响，但选不动就没法改中间一段）。 */
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ── 图标：字形由 CSS 生成，不是 DOM 文本 ────────────────────────────────────
+ * Material Symbols 的图标靠连字渲染，所以「图标」原先就是一个真的文本节点
+ * （<span>download</span>）。手机浏览器的长按取词层——小米、华为、多数第三方
+ * Android 浏览器——直接读 DOM 文本，**不理 user-select**，于是照样能选中并复制出
+ * "download" 这种内部标识符。桌面浏览器守规矩，所以只在手机上复现。
+ *
+ * 与其继续加前缀跟它们博弈，不如让那段文本根本不存在：字形改由 ::before 的
+ * content: attr(data-icon) 生成。伪元素内容不属于 DOM 文本，规范层面就不可选中、
+ * 不可复制，也不会被「选中整条消息」一起复制走（这是顺带修掉的另一个问题：以前
+ * 复制一条带文件图标的消息会把图标名也粘出来）。连字照常成形——生成内容一样走
+ * 字体整形。
+ *
+ * 代价：每个图标 span 必须带 data-icon。漏了就是图标不显示——一眼可见的失败，
+ * 不是静默降级；web-selection.test.js 里有一条把所有 span 枚举出来的守卫。 */
+.material-symbols-outlined::before {
+  content: attr(data-icon);
+}
+
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  /* -webkit- 前缀不是冗余：原先只有无前缀那条，小米自带浏览器这类较旧的 Chromium
+     分支不认，于是长按图标照样能选中并复制出连字名（用户实测把 "arrow_upward"
+     当消息发出去过）。
+     这条是**直接声明**，而 user-select 是继承属性 —— 所以内容白名单把祖先设成
+     text 不会渗进图标里，无需在每处白名单再关一遍。前提是白名单不写 `*`。 */
+  -webkit-user-select: none;
+  user-select: none;
+  /* iOS 长按弹出的「拷贝/查找」浮层单靠 user-select 关不掉 */
+  -webkit-touch-callout: none;
+  font-variation-settings: 'FILL' var(--flikky-icon-fill, 0), 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  transition: font-variation-settings var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default);
+}
+
+:focus-visible {
+  outline: 3px solid rgb(var(--mdui-color-secondary));
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--mdui-color-outline-variant));
+  border-radius: 999px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

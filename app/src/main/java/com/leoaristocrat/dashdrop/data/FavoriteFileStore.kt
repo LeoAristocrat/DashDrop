@@ -1,0 +1,53 @@
+package com.leoaristocrat.dashdrop.data
+
+import java.io.File
+import java.io.InputStream
+
+class FavoriteFileStore(
+    private val filesDir: File,
+) {
+    private fun favoriteDir(): File = File(filesDir, "favorites").apply { mkdirs() }
+
+    fun copyIn(depotFileId: String, source: File): File {
+        require(source.exists() && source.isFile) { "Favorite source file does not exist: ${source.absolutePath}" }
+        val target = resolve(depotFileId)
+        source.inputStream().use { input ->
+            target.outputStream().use { output -> input.copyTo(output) }
+        }
+        return target
+    }
+
+    fun copyIn(depotFileId: String, source: InputStream): File {
+        val target = resolve(depotFileId)
+        source.use { input ->
+            target.outputStream().use { output -> input.copyTo(output) }
+        }
+        return target
+    }
+
+    fun resolve(depotFileId: String): File = File(favoriteDir(), depotFileId)
+
+    /** favorites/thumbs/{favoriteId}.jpg: derived thumbnails for saved media. */
+    fun thumbnailFile(favoriteId: Long): File {
+        require(favoriteId > 0L) { "invalid favorite id" }
+        return File(File(favoriteDir(), "thumbs"), "$favoriteId.jpg").apply { parentFile?.mkdirs() }
+    }
+
+    fun deleteThumbnail(favoriteId: Long): Boolean {
+        require(favoriteId > 0L) { "invalid favorite id" }
+        val file = File(File(favoriteDir(), "thumbs"), "$favoriteId.jpg")
+        return !file.exists() || file.delete()
+    }
+
+    fun delete(depotFileId: String): Boolean {
+        val file = resolve(depotFileId)
+        if (!file.exists()) return true
+        return file.delete()
+    }
+
+    /** Deletes the complete favorites file tree. Missing storage is already clean. */
+    fun deleteAll(): Boolean {
+        val root = File(filesDir, "favorites")
+        return !root.exists() || root.deleteRecursively()
+    }
+}

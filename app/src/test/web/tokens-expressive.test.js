@@ -1,0 +1,109 @@
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const WEB = path.join(__dirname, '../../main/assets/web');
+const tokens = fs.readFileSync(path.join(WEB, 'tokens.css'), 'utf8');
+const springs = fs.readFileSync(path.join(WEB, 'springs.css'), 'utf8');
+const shapes = fs.readFileSync(path.join(WEB, 'shapes.svg.html'), 'utf8');
+const chat = fs.readFileSync(path.join(WEB, 'chat.css'), 'utf8');
+
+// rgba(0, 0, 0, .10) -> 0.1; takes the last comma-separated component of every rgba(...).
+function maxAlpha(str) {
+  const alphas = [...str.matchAll(/rgba\(([^)]*)\)/g)]
+    .map((m) => parseFloat(m[1].split(',').pop()));
+  assert.ok(alphas.length > 0, `no rgba() found in: ${str}`);
+  return Math.max(...alphas);
+}
+
+test('generated files carry a do-not-edit banner', () => {
+  assert.match(tokens, /DO NOT EDIT BY HAND/);
+  assert.match(springs, /DO NOT EDIT BY HAND/);
+});
+
+test('six Expressive spring curves are emitted with durations', () => {
+  for (const name of [
+    'spatial-fast', 'spatial-default', 'spatial-slow',
+    'effects-fast', 'effects-default', 'effects-slow',
+  ]) {
+    assert.match(springs, new RegExp(`--flikky-spring-${name}:\\s*linear\\(`), name);
+    assert.match(springs, new RegExp(`--flikky-spring-${name}-dur:\\s*\\d+ms`), `${name} duration`);
+  }
+});
+
+test('spatial springs overshoot past 1 — that overshoot IS the Expressive feel', () => {
+  const curve = springs.match(/--flikky-spring-spatial-default:\s*linear\(([^)]*)\)/)[1];
+  const peak = Math.max(...curve.split(',').map((v) => parseFloat(v)));
+  assert.ok(peak > 1, `expected overshoot, peak was ${peak}`);
+});
+
+test('effects springs are critically damped — no overshoot on color/opacity', () => {
+  const curve = springs.match(/--flikky-spring-effects-default:\s*linear\(([^)]*)\)/)[1];
+  const peak = Math.max(...curve.split(',').map((v) => parseFloat(v)));
+  assert.ok(peak <= 1.0001, `effects curve must not overshoot, peak was ${peak}`);
+});
+
+test('Expressive shape tiers are present alongside the App-derived five', () => {
+  for (const k of ['xs', 'sm', 'md', 'lg', 'xl', 'xl-increased', 'xxl']) {
+    assert.match(tokens, new RegExp(`--flikky-shape-${k}:`), k);
+  }
+});
+
+test('semantic surface layering is defined for light, dark and amoled', () => {
+  assert.match(tokens, /--flikky-page-bg:/);
+  assert.match(tokens, /--flikky-pillar-bg:/);
+  assert.match(tokens, /--flikky-raised-bg:/);
+  assert.match(tokens, /\.mdui-theme-dark[\s\S]*--flikky-page-bg:/);
+  assert.match(tokens, /\[data-amoled="1"\][\s\S]*--flikky-page-bg:\s*#000/);
+});
+
+test('the auto theme follows the system so there is no first-frame flash', () => {
+  // <html class="mdui-theme-auto"> 是初始状态，applyTheme() 跑过才变成 dark/light。
+  assert.match(tokens, /prefers-color-scheme:\s*dark[\s\S]*\.mdui-theme-auto[\s\S]*--flikky-page-bg:/);
+});
+
+test('reduced motion collapses the motion scale to zero', () => {
+  assert.match(tokens, /prefers-reduced-motion:\s*reduce[\s\S]*--flikky-motion-scale:\s*0/);
+});
+
+test('cookie9 clipPath uses objectBoundingBox so one path fits every size', () => {
+  assert.match(shapes, /clipPathUnits="objectBoundingBox"/);
+  assert.match(shapes, /id="flikky-cookie9"/);
+});
+
+test('cookie9 compatibility id now carries the official cubic geometry', () => {
+  const legacy = shapes.match(/id="flikky-cookie9"[^>]*>\s*<path d="([^"]+)"/);
+  assert.ok(legacy, 'missing legacy cookie9 path');
+  assert.match(legacy[1], /^M\s+[\d.-]+\s+[\d.-]+\s+C\s+/);
+  assert.doesNotMatch(legacy[1], /\sA\s/);
+});
+
+test('type tokens carry an explicit font-weight so the font shorthand never resets to 400', () => {
+  // font: var(--flikky-type-x) var(--flikky-font-family) 是合法的 font 简写；
+  // 若主变量里没有 weight 分量，简写会把粗细悄悄压回 400 —— titleMedium/titleSmall/
+  // label-* 在 Type.kt 里是 Medium(500)，漏写 weight 就会比 App 端轻一档，且没有任何
+  // 测试会因此变红（外观问题，不是解析/构建错误）。
+  assert.match(tokens, /--flikky-type-display-large:\s*400\s+57px\/64px;/, 'Normal -> 400');
+  assert.match(tokens, /--flikky-type-title-medium:\s*500\s+16px\/24px;/, 'Medium -> 500');
+  assert.match(tokens, /--flikky-type-label-large:\s*500\s+14px\/20px;/, 'Medium -> 500');
+});
+
+test('the raised-surface shadow token exists per theme mode and hover never goes darker than rest (F3)', () => {
+  // 阴影 token 挪进生成器之后，三种模式都要真的定义；且静止阴影必须比 hover 阴影更弱——
+  // 否则会出现「越亮越重」的反直觉手感（数值比较，不能把两边都写成硬编码字面量）。
+  assert.match(tokens, /:root\s*\{[^}]*--flikky-raised-shadow:/s);
+  assert.match(tokens, /\.mdui-theme-dark\s*\{[^}]*--flikky-raised-shadow:/s);
+  assert.match(tokens, /\[data-amoled="1"\]\s*\{[^}]*--flikky-raised-shadow:/s);
+
+  const rootShadowDecl = tokens.match(/--flikky-raised-shadow:\s*([^;]+);/)[1];
+  const rootAlpha = maxAlpha(rootShadowDecl);
+  assert.ok(rootAlpha <= 0.15, `:root raised-shadow alpha too strong: ${rootAlpha}`);
+
+  const hoverRule = chat.match(/\.fk-fab:hover\s*\{[^}]*\}/s)[0];
+  const hoverAlpha = maxAlpha(hoverRule);
+  assert.ok(
+    hoverAlpha > rootAlpha,
+    `hover shadow (${hoverAlpha}) must be strictly darker than resting :root shadow (${rootAlpha})`,
+  );
+});

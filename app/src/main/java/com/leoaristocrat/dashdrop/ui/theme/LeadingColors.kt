@@ -1,0 +1,68 @@
+package com.leoaristocrat.dashdrop.ui.theme
+
+import androidx.compose.material3.ColorScheme
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import com.leoaristocrat.dashdrop.util.LeadingColorMode
+import com.leoaristocrat.dashdrop.util.LeadingShape
+import com.leoaristocrat.dashdrop.util.LeadingType
+import com.leoaristocrat.dashdrop.util.LeadingVisualCatalog
+import com.materialkolor.blend.Blend
+import com.materialkolor.dynamicColorScheme
+import com.materialkolor.hct.Hct
+
+data class LeadingColorPair(
+    val container: Color,
+    val onContainer: Color,
+)
+
+data class LeadingVisualStyle(
+    val shape: LeadingShape = LeadingShape.Default,
+    val colors: Map<String, LeadingColorPair> = emptyMap(),
+)
+
+val LocalLeadingVisual = compositionLocalOf { LeadingVisualStyle() }
+
+fun resolveLeadingColors(
+    mode: LeadingColorMode,
+    theme: ColorScheme,
+    dark: Boolean,
+): Map<String, LeadingColorPair> = LeadingVisualCatalog.types.associate { type ->
+    type.id to when (mode) {
+        LeadingColorMode.THEME -> LeadingColorPair(
+            container = theme.secondaryContainer,
+            onContainer = theme.onSecondaryContainer,
+        )
+        LeadingColorMode.HARMONIZED -> harmonizedColors(type, theme, dark)
+        LeadingColorMode.FIXED -> generatedColors(type.fixedArgb.toInt(), dark)
+    }
+}
+
+fun Map<String, LeadingColorPair>.toWireColors(): Map<String, List<String>> =
+    mapValues { (_, pair) -> listOf(pair.container.toRgbHex(), pair.onContainer.toRgbHex()) }
+
+private fun Color.toRgbHex(): String = "#%06X".format(toArgb() and 0xFFFFFF)
+
+private fun harmonizedColors(
+    type: LeadingType,
+    theme: ColorScheme,
+    dark: Boolean,
+): LeadingColorPair {
+    val themePrimary = theme.primary.toArgb()
+    val primaryHct = Hct.fromInt(themePrimary)
+    val shifted = primaryHct.withHue((primaryHct.hue + type.hueShift) % 360.0).toInt()
+    val seed = Blend.harmonize(shifted, themePrimary)
+    val generated = dynamicColorScheme(seedColor = Color(seed), isDark = dark)
+
+    return if (type.id == "other") {
+        LeadingColorPair(generated.primaryContainer, generated.onPrimaryContainer)
+    } else {
+        LeadingColorPair(generated.secondaryContainer, generated.onSecondaryContainer)
+    }
+}
+
+private fun generatedColors(seedArgb: Int, dark: Boolean): LeadingColorPair {
+    val generated = dynamicColorScheme(seedColor = Color(seedArgb), isDark = dark)
+    return LeadingColorPair(generated.primaryContainer, generated.onPrimaryContainer)
+}

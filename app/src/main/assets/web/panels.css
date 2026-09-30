@@ -1,0 +1,887 @@
+/* ============================================================================
+ * 功能柱：收藏 / 设置
+ * 核心语言 = 分段列表组（connected group）：每行独立圆角、行间 2px、
+ * 组内首尾大圆角中间小圆角、按下时该行圆角收缩且相邻行被挤压。
+ * 与 App 设置页/收藏页同一套观感 —— 双端一致优先。
+ * 从原型 docs/others/prototypes/v1.19.0-web/css/panels.css 移植，
+ * 变量前缀 --fk- → --flikky-，.msym → .material-symbols-outlined，
+ * .fk-scroll → .flikky-scroll（scrollbar 处理已在 shell.css，这里不重复声明）。
+ * .fk-panel-head/.fk-panel-title/.fk-panel-body 在原型里挂在 shell.css，
+ * 这里随面板内容一起落地（shell.css 只留了 .fk-panel-collapse 的收起规则）。
+ * ==========================================================================*/
+
+:root {
+  /* 这几个 token 生产环境没有对应值，声明在本文件里 */
+  --flikky-listgroup-radius-outer: var(--flikky-shape-lg);
+  --flikky-listgroup-radius-inner: var(--flikky-shape-xs);
+  --flikky-listgroup-gap: 2px;
+  --flikky-press-squeeze-row: 0.96;
+  --flikky-size-row-min: 56px;
+}
+
+/* ── 功能柱头部 + 面板体 ─────────────────────────────────────────────────── */
+
+.fk-panel-head {
+  flex: none;
+  padding: var(--flikky-space-xxl) var(--flikky-space-xxl) var(--flikky-space-lg);
+  display: flex;
+  align-items: center;
+  gap: var(--flikky-space-md);
+}
+
+.fk-panel-title {
+  font: var(--flikky-type-headline-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-headline-small-tracking);
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fk-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--flikky-space-xxl) var(--flikky-space-xxl);
+}
+
+/* ── 搜索框（outlined，全圆） ────────────────────────────────────────────── */
+
+.fk-search {
+  display: flex;
+  align-items: center;
+  gap: var(--flikky-space-md);
+  /* min- 而不是固定 height：固定值在 IME 候选条把行盒顶高时会溢出，
+     min-height 既保底（不会比触控目标矮）又允许长大。
+     2026-09-08 装机反馈「搜索框太矮、输入字符后忽然变高」。 */
+  min-height: var(--flikky-size-touch);
+  box-sizing: border-box;
+  padding: 0 var(--flikky-space-lg);
+  border-radius: var(--flikky-shape-full);
+  background: rgb(var(--mdui-color-surface-container-high));
+  color: rgb(var(--mdui-color-on-surface-variant));
+  transition: background-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default);
+}
+.fk-search:focus-within { background: rgb(var(--mdui-color-surface-container-highest)); }
+
+/* 文件面板的搜索行在滚动容器**外面**（renderShell 会清空 body，放里面会连同
+   焦点一起被摧毁），所以它拿不到 .fk-panel-body 的内边距，在这里补齐 ——
+   补的是同一个 token，与收藏面板那条对齐。 */
+/* 文件面板的 sticky 头块：搜索行 + 面包屑 + 加载计数 + 进度条。
+   住在滚动容器**内**，所以自动拿到 `scrollbar-gutter: stable` 让出的那条槽位
+   —— 右边缘与列表严丝合缝（2026-09-08 装机反馈「左侧对齐、右侧没对齐」）。
+   负 margin 逃出 body 的水平内边距，与 .fk-crumbs 同一手法。 */
+.fk-files-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: 0 calc(-1 * var(--flikky-space-xxl));
+  padding: 0 var(--flikky-space-xxl);
+  background: var(--flikky-pillar-surface);
+}
+/* 头块里的面包屑不再自己 sticky —— 整块一起吸顶，多个 sticky 元素要手工算
+   彼此的 top 偏移，差一像素滚动时就互相穿透。 */
+.fk-files-sticky .fk-crumbs {
+  position: static;
+  margin: 0;
+  padding: var(--flikky-space-sm) 0;
+}
+.fk-files-sticky > .fk-search {
+  margin-bottom: var(--flikky-space-sm);
+}
+
+/* 加载中的计数。**只在加载中出现**：完成后的「共 N 项」只留列表尾那一处
+   （用户裁决 2026-09-08）。刻意复用页脚的排版，两处是同一种信息。 */
+.fk-files-loading-count {
+  margin: 0 0 var(--flikky-space-xs);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  font: var(--flikky-type-body-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-small-tracking);
+  text-align: center;
+}
+.fk-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: rgb(var(--mdui-color-on-surface));
+  font: var(--flikky-type-body-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-large-tracking);
+}
+
+/* ── 过滤 chips ──────────────────────────────────────────────────────────── */
+
+.fk-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--flikky-space-sm);
+  margin: var(--flikky-space-lg) 0;
+}
+/* .fk-chip 已删除：筛选 chips 换成官方 mdui-chip（variant="filter"）。
+   自绘那版要自己补选中态配色、check 图标、涟漪与键盘语义，mdui 现成的更好。
+   容器 .fk-chips 保留 —— 它只管排布，与用什么 chip 无关。 */
+
+/* ── 分段列表组 ──────────────────────────────────────────────────────────── */
+
+/* 分组标题用 onSurfaceVariant，不用 primary：
+   行本身已经是染色容器，标题再上主色会让整块过饱和（红色系主题下尤其明显）。 */
+.fk-section-title {
+  font: var(--flikky-type-label-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-large-tracking);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  margin: var(--flikky-space-xxl) 0 var(--flikky-space-sm);
+  padding-inline-start: var(--flikky-space-lg);
+}
+.fk-section-title:first-child { margin-top: 0; }
+
+.fk-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--flikky-listgroup-gap);
+}
+
+.fk-item {
+  display: flex;
+  align-items: center;
+  gap: var(--flikky-space-md);
+  min-height: var(--flikky-size-row-min);
+  padding: var(--flikky-space-md) var(--flikky-space-lg);
+  background: rgb(var(--mdui-color-surface-container));
+  color: rgb(var(--mdui-color-on-surface));
+  border: 0;
+  width: 100%;
+  text-align: start;
+  cursor: pointer;
+  /* 「关于」区的 GitHub 行是真 <a href>，浏览器默认会给它整行加下划线，
+     连副标题和两个图标的基线都被划上（见 Screenshot_22）。列表行不是正文链接。 */
+  text-decoration: none;
+  border-radius: var(--flikky-listgroup-radius-inner);
+  transition:
+    border-radius var(--flikky-spring-spatial-fast-dur) var(--flikky-spring-spatial-fast),
+    transform var(--flikky-spring-spatial-fast-dur) var(--flikky-spring-spatial-fast),
+    background-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default);
+}
+
+/* 组内首尾外圆角 */
+.fk-group > .fk-item:first-child {
+  border-start-start-radius: var(--flikky-listgroup-radius-outer);
+  border-start-end-radius: var(--flikky-listgroup-radius-outer);
+}
+.fk-group > .fk-item:last-child {
+  border-end-start-radius: var(--flikky-listgroup-radius-outer);
+  border-end-end-radius: var(--flikky-listgroup-radius-outer);
+}
+.fk-group > .fk-item:only-child { border-radius: var(--flikky-listgroup-radius-outer); }
+
+/* 同一组外圆角，但判据是**数据下标**而不是 DOM 位置。
+ *
+ * 文件面板要虚拟化：DOM 里只剩视口附近那几十行，`:first-child` 就不再是「列表
+ * 第一行」—— 滚到中间时会有一行莫名其妙带上外圆角。所以那边由 JS 按下标打
+ * `.is-first` / `.is-last`。收藏面板整份渲染，继续用上面的结构选择器。
+ *
+ * token 与上面逐个对应，所以两套机制画出来一模一样。 */
+.fk-item.is-first {
+  border-start-start-radius: var(--flikky-listgroup-radius-outer);
+  border-start-end-radius: var(--flikky-listgroup-radius-outer);
+}
+.fk-item.is-last {
+  border-end-start-radius: var(--flikky-listgroup-radius-outer);
+  border-end-end-radius: var(--flikky-listgroup-radius-outer);
+}
+
+.fk-item:hover { background: rgb(var(--mdui-color-surface-container-high)); }
+
+/* 按下形变：本行圆角收缩，上下相邻行被挤压（MD3 connected group childSizeChange） */
+.fk-item:active { border-radius: var(--flikky-listgroup-radius-inner); transform: scale(.985); }
+.fk-item:active + .fk-item,
+.fk-item:has(+ .fk-item:active) { transform: scaleY(var(--flikky-press-squeeze-row)); }
+
+.fk-item[aria-selected="true"] {
+  background: rgb(var(--mdui-color-secondary-container));
+  color: rgb(var(--mdui-color-on-secondary-container));
+}
+
+/* 行首视觉：文件用官方异形容器，与会话里的文件泡、App 的文件行完全同形 */
+.fk-item-lead {
+  width: var(--flikky-size-file-icon);
+  height: var(--flikky-size-file-icon);
+  flex: none;
+  display: grid;
+  place-items: center;
+  clip-path: var(--flikky-leading-clip);
+  background: rgb(var(--mdui-color-secondary-container));
+  color: rgb(var(--mdui-color-on-secondary-container));
+}
+.fk-item-lead--thumb { clip-path: none; border-radius: var(--flikky-shape-xs); overflow: hidden; }  /* App FileLeadingSpec.thumbnailShape = 8dp */
+.fk-item-lead--thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.fk-item-lead--plain {
+  clip-path: none;
+  background: none;
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* 这三个在 DOM 里是 span（为了语义上仍属一行），必须显式 block，
+   否则默认 inline 会让标题和副标题挤在同一行（"xxx.txt298.3 KB · 07-22" 就是这么来的）。 */
+.fk-item-text { flex: 1 1 auto; min-width: 0; display: block; }
+.fk-item-title {
+  display: block;
+  font: var(--flikky-type-body-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-large-tracking);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fk-item-title--wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.fk-item-sub {
+  display: block;
+  margin-top: 2px;
+  font: var(--flikky-type-body-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-medium-tracking);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── 可选中白名单（默认关在 base.css）────────────────────────────────────────
+ * 收藏行的标题/副标题是用户存进来的内容（文本片段、文件名），必须能选能复制 ——
+ * 行上虽然有复制按钮，但「只要中间一段」这个需求按钮满足不了。
+ * 设置面板的行不在白名单里（那些是界面标签），只有两处例外单独开：
+ * 「关于」的版本号（提 issue 要贴）和 GitHub 地址。 */
+#fav-list .fk-item-title,
+#fav-list .fk-item-sub,
+#view-settings .fk-item-sub {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.fk-item-trail {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--flikky-space-xs);
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+.fk-icon-btn {
+  width: var(--flikky-size-touch);
+  height: var(--flikky-size-touch);
+  border: 0;
+  border-radius: var(--flikky-shape-full);
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  border-radius: var(--flikky-morph-round);
+  transition:
+    background-color var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    border-radius var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default);
+}
+.fk-icon-btn:hover:not(:disabled) { background: rgba(var(--mdui-color-on-surface), .08); }
+.fk-icon-btn:active:not(:disabled) {
+  background: rgba(var(--mdui-color-on-surface), .12);
+  border-radius: var(--flikky-morph-round-pressed);
+  transition: border-radius var(--flikky-morph-press-dur) var(--flikky-morph-press-ease);
+}
+/* 禁用态。`disabled` 属性本来就设着（点了确实没反应），但**没有任何样式** ——
+ * 于是它看起来完全可点，`:hover` 和 `:active` 还照样给反馈，比单纯少个灰化更糟：
+ * 界面在主动说「这里能点」。装机验收原话：「虽然看起来点击后没有任何反应，
+ * 但还是建议将它改为 disable 状态，显式的无法点击」。
+ *
+ * 数值照 MD3、也照本项目 pages.css 里 `.fk-btn:disabled` 的既有处理：
+ * 内容 on-surface 38%，填充变体的容器 12%。 */
+.fk-icon-btn:disabled {
+  color: rgba(var(--mdui-color-on-surface), .38);
+  background: none;
+  cursor: default;
+}
+.fk-icon-btn--filled:disabled {
+  background: rgba(var(--mdui-color-on-surface), .12);
+  color: rgba(var(--mdui-color-on-surface), .38);
+}
+
+.fk-icon-btn--filled {
+  background: rgb(var(--mdui-color-secondary-container));
+  color: rgb(var(--mdui-color-on-secondary-container));
+}
+
+/* 复选框（多选态） */
+.fk-check {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 6px;
+  border: 2px solid rgb(var(--mdui-color-outline));
+  display: grid;
+  place-items: center;
+  color: transparent;
+  transition:
+    background-color var(--flikky-spring-effects-fast-dur) var(--flikky-spring-effects-fast),
+    border-color var(--flikky-spring-effects-fast-dur) var(--flikky-spring-effects-fast),
+    transform var(--flikky-spring-spatial-fast-dur) var(--flikky-spring-spatial-fast);
+}
+.fk-check .material-symbols-outlined { font-size: 16px; }
+.fk-item[aria-selected="true"] .fk-check {
+  background: rgb(var(--mdui-color-primary));
+  border-color: rgb(var(--mdui-color-primary));
+  color: rgb(var(--mdui-color-on-primary));
+  transform: scale(1.08);
+}
+
+/* ── 多选浮动工具条（MD3 floating toolbar：全圆、surface-container）──────── */
+
+.fk-toolbar {
+  position: absolute;   /* 定位祖先是 .fk-view（撑满可见面板），不是整根 pillar */
+  left: 50%;
+  bottom: var(--flikky-space-xl);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--flikky-space-xs);
+  padding: var(--flikky-space-sm);
+  padding-inline-start: var(--flikky-space-lg);
+  border-radius: var(--flikky-shape-full);
+  /* 比列表行高一档，否则和 surface-container 的行同色、糊在一起 */
+  background: rgb(var(--mdui-color-surface-container-high));
+  box-shadow: var(--flikky-raised-shadow);
+  z-index: 30;
+  animation: fk-toolbar-in var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default) both;
+}
+.fk-toolbar[hidden] { display: none; }
+@keyframes fk-toolbar-in {
+  from { opacity: 0; transform: translate(-50%, 20px) scale(.9); }
+  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+.fk-toolbar-count {
+  font: var(--flikky-type-label-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-large-tracking);
+  margin-inline-end: var(--flikky-space-sm);
+  white-space: nowrap;
+}
+
+/* ── 设置行控件 ──────────────────────────────────────────────────────────── */
+
+/* 开关改用 mdui-switch（自带焦点/键盘/aria），自绘版本已删除 */
+
+.fk-value {
+  font: var(--flikky-type-body-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-medium-tracking);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  white-space: nowrap;
+}
+
+/* ── 空态 ────────────────────────────────────────────────────────────────── */
+
+.fk-empty {
+  display: grid;
+  place-items: center;
+  gap: var(--flikky-space-md);
+  padding: 64px var(--flikky-space-xl);
+  text-align: center;
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+.fk-empty .material-symbols-outlined {
+  font-size: 48px;
+  color: rgb(var(--mdui-color-outline));
+}
+.fk-empty-title {
+  font: var(--flikky-type-title-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-title-medium-tracking);
+  color: rgb(var(--mdui-color-on-surface));
+}
+
+/* .fk-error 在整套面板样式里原本缺失（Task 5 只搬了空态）——收藏面板的加载失败态
+   复用 .fk-empty 的骨架，只需把图标从中性的 outline 色换成 error 色，
+   跟「真的没有/功能关闭」在视觉上分开。这是本任务唯一新增的 CSS 规则。 */
+.fk-error .material-symbols-outlined {
+  color: rgb(var(--mdui-color-error));
+}
+
+/* ── 文件面板：面包屑与中性提示（v1.20.0） ──────────────────────────────────
+   面包屑是 MD3 里没有的组件（本地 44 个组件文档均无 breadcrumb），全自绘。
+   2026-08-29 裁决：type 用 label-large 档（它是导航 chrome 而非内容），
+   分隔符用官方 chevron_right 图标而非文本 › —— 文本字符的宽度与基线在不同
+   字体/语言下不稳定，且项目红线要求所有 icon 走官方库。
+   `.fk-item` 族一行都没动：文件行逐槽位复用它，视觉与文件总览页零差异。 */
+/* 面包屑**吸顶**：滚到任何位置都能知道自己在哪一层（装机验收 2026-09-03）。
+ *
+ * sticky 只相对最近的滚动祖先生效，这里是 `.fk-panel-body`（overflow-y: auto），
+ * 面包屑正是 renderBreadcrumb 塞进它里面的。移出去 sticky 就静默失效 ——
+ * CSS 不会报错，所以那个前提在 panel-files-chrome.test.js 里单独钉着。
+ *
+ * 背景用 `--flikky-pillar-surface` —— 面板就坐在 .fk-pillar 上，那个变量由柱子
+ * 自己声明（shell.css），宽屏窄屏各解析成不同的值。**不要直接引
+ * `--flikky-pillar-bg`**：窄屏下柱子换成了 --flikky-page-bg，写死那个 token
+ * 会露出一块与四周不齐的色板（2026-09-13 装机反馈 Screenshot_37）。
+ * 用别的 surface token 同样会差一档（更早一次装机验收看到一条色带）。
+ *
+ * 背景与 z-index 都是必需的：不给背景，滚上来的行会从它下面透出来；
+ * 不给 z-index，行的 `:active` transform 会创建层叠上下文并盖在它上面。
+ * 左右用负 margin + 同额 padding 撑满，否则行的边缘会从两侧露出来。 */
+.fk-crumbs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0 calc(-1 * var(--flikky-space-xxl));
+  padding: var(--flikky-space-sm) var(--flikky-space-xxl);
+  background: var(--flikky-pillar-surface);
+}
+.fk-crumbs ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fk-crumbs li {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.fk-crumb {
+  font: var(--flikky-type-label-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-large-tracking);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  background: none;
+  border: 0;
+  padding: 4px 6px;
+  border-radius: var(--flikky-shape-xs);
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.fk-crumb {
+  cursor: pointer;
+}
+button.fk-crumb:hover {
+  background: rgb(var(--mdui-color-surface-container-high));
+}
+/* 当前级：不是按钮，也不该看起来像能点。用主色加重，表达「你在这」。 */
+.fk-crumb[aria-current="page"] {
+  color: rgb(var(--mdui-color-on-surface));
+  font-weight: 600;
+}
+/* 折叠控件（…）：不该跟具名层级一样占到 14ch，也不该长得像一段被截断的文字。 */
+.fk-crumb--more {
+  max-width: none;
+  padding-inline: var(--flikky-space-sm);
+  letter-spacing: 0;
+}
+
+.fk-crumb-sep {
+  font-size: 16px;
+  color: rgb(var(--mdui-color-outline));
+  flex: 0 0 auto;
+}
+.fk-panel-notice {
+  margin: 0;
+  padding: var(--flikky-space-lg) var(--flikky-space-md);
+  text-align: center;
+  font: var(--flikky-type-body-medium) var(--flikky-font-family);
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* 引导态：需要用户去手机上操作的状态（缺权限 / 系统限制）。
+   刻意没有任何按钮——用户要做的事不在这个页面上，摆个按钮只会让人反复点它。 */
+.fk-guidance {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--flikky-space-sm);
+  padding: var(--flikky-space-xl) var(--flikky-space-lg);
+  text-align: center;
+}
+.fk-guidance-icon {
+  font-size: 40px;
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+.fk-guidance-title {
+  margin: 0;
+  font: var(--flikky-type-title-medium) var(--flikky-font-family);
+  color: rgb(var(--mdui-color-on-surface));
+}
+.fk-guidance-body {
+  margin: 0;
+  max-width: 34ch;
+  font: var(--flikky-type-body-medium) var(--flikky-font-family);
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* ── 文件面板：加载进度与列表进出场 ─────────────────────────────────────────
+ * 大目录的列举在服务端要几百毫秒。装机验收里这段时间界面毫无变化，
+ * 用户以为没点上（App 端同一个问题）。面包屑立即前进 + 这条进度是「有反应」的来源。 */
+/* 加载完成后**向上缩回**，而不是硬切消失。
+ *
+ * 硬切的话下面的列表会瞬间跳上来一整条的高度。高度与上下外边距一起过渡 ——
+ * 只动高度、margin 还在，列表仍会硬跳一段。
+ *
+ * 收起态用类而**不用 `[hidden]`**：base.css 的全局 reset 把 `[hidden]` 变成
+ * `display: none !important`，那会让过渡完全不发生（那条 reset 的注释里记着
+ * 这个坑，`.fk-fab` 当初就是为此加了 data-hidden-animated 的例外）。
+ * 收起之后加 `visibility: hidden` 离开无障碍树，否则读屏器还在念一个
+ * 已经不存在的进度条。
+ *
+ * 弹簧走 spatial（有位移），与 App 主页 chips 分组的显隐同一档。 */
+.fk-files-progress {
+  /* `mdui-linear-progress` 的 host 样式是 `display: inline-block; width: 100%`。
+     所以**横向外边距一律为 0**：100% 已经填满容器，再加左右外边距会让它
+     整体宽度超出容器 —— 左边空出一条、右边溢出一条，还会给滚动容器撑出一条
+     永久的横向滚动条（2026-09-09 装机反馈的两个症状同此一因）。
+     横向内缩由 .fk-files-sticky 的 padding 统一给，这里不再自己缩。
+
+     改 display 是为了去掉 inline-block 的基线残留：作为行内盒它会带一个
+     行高，`.is-done` 把 height 收到 0 之后那份行高仍占着位置。 */
+  display: block;
+  height: 4px;
+  margin: var(--flikky-space-xl) 0;
+  overflow: hidden;
+  transition:
+    height var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default),
+    margin-top var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default),
+    margin-bottom var(--flikky-spring-spatial-default-dur) var(--flikky-spring-spatial-default),
+    opacity var(--flikky-spring-effects-default-dur) var(--flikky-spring-effects-default),
+    visibility 0s linear var(--flikky-spring-spatial-default-dur);
+}
+.fk-files-progress.is-done {
+  height: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  opacity: 0;
+  visibility: hidden;
+}
+
+/* 排序菜单的**定位层**。分工严格照 chat.css 的 .recall-menu：
+   这一层只管「放在哪」，面板背景 / 圆角 / 海拔 / 菜单项交互态全部归内部的
+   官方 mdui-menu —— 所以视觉仍是 mdui 那套，没有自绘。
+
+   为什么需要它：.fk-pillar 有 overflow: hidden，而 mdui 的菜单是普通 DOM
+   子元素（不走 top layer），套 mdui-dropdown 会被祖先裁切、菜单跑到按钮
+   右边（2026-09-08 装机反馈）。z-index 救不了 —— 它不能突破 overflow 裁切。
+   详见 sort-menu.js。 */
+.fk-sort-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 180px;
+  /* 从左上角长出来。原点必须与「左边缘对齐按钮左边缘」这个定位一致，
+     否则视觉上是「淡入到按钮旁边」而不是「从按钮里展开」——
+     用户的原话是「感觉上和按钮是分开的」。 */
+  transform-origin: top left;
+  animation: fk-sort-menu-in var(--flikky-spring-spatial-fast-dur)
+             var(--flikky-spring-spatial-fast) both;
+}
+@keyframes fk-sort-menu-in {
+  from { opacity: 0; transform: scale(.92) translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* 排序菜单项。容器与交互态由 mdui-menu-item 自己给（D30：需要 scrim /
+   焦点陷阱 / Esc / ARIA 的用官方组件），这里只管方向箭头的呈现。 */
+.fk-sort-item {
+  /* 菜单项自带 padding 与 hover 态；这条存在是为了让「面板 emit 的每个类名
+     都在样式表里」成立（D35 的守卫），并给箭头一个定位上下文。 */
+  position: relative;
+}
+
+/* 当前排序键右侧的方向箭头。它既是选中指示也是方向指示 ——
+   一个元素说完两件事，所以菜单里不再放对勾。 */
+.fk-sort-dir {
+  font-size: 18px;
+  color: rgb(var(--mdui-color-primary));
+}
+@media (prefers-reduced-motion: reduce) {
+  .fk-files-progress { transition: none; }
+}
+
+/* 目录切换：整列表按「进/退」方向横移淡入。
+ *
+ * 方向由 JS 在容器上写 data-dir=enter|exit（进目录=从右滑入，返回=从左滑入），
+ * 与 App 端面包屑的方向逻辑同构。这一层给的是「我进到别处了」的空间感；
+ * 下面逐行的那一层给的是「内容在陆续到达」。两层叠着看才是完整的动线。
+ *
+ * 时长走 spatial（带位移，用 spatial 而非 effects），且容器动画只跑一次——
+ * 逐行动画在子元素上，两者不会互相取消。 */
+/* 虚拟化容器。**行留在正常流里** —— 几何与 .fk-group 逐项相同（只去掉那两条
+ * 结构化的首尾圆角选择器，首尾改由数据下标打 class）。
+ *
+ * 行距因此完全由下面这条 `gap` 负责，与收藏面板同一个 token、同一条声明：
+ * 「与收藏面板视觉零差异」是**结构保证**的，不取决于 JS 算得对不对。
+ *
+ * 曾经把行绝对定位在算出来的 `top` 上。那要求 JS 知道行距，而行距取决于字体、
+ * 主题、缩放与内容 —— 装机验收连报三轮「挨得太近了」。现在滚动区间由
+ * `.fk-vspace` 两个占位块撑出来，行距测量只影响滚动条精度。 */
+.fk-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--flikky-listgroup-gap);
+}
+
+/* 窗口之外那些行的替身，只负责占高度。 */
+.fk-vspace {
+  flex: none;
+  pointer-events: none;
+}
+
+.fk-files-list[data-dir='enter'] {
+  animation: fk-files-enter var(--flikky-spring-spatial-fast-dur)
+    var(--flikky-spring-spatial-fast) both;
+}
+.fk-files-list[data-dir='exit'] {
+  animation: fk-files-exit var(--flikky-spring-spatial-fast-dur)
+    var(--flikky-spring-spatial-fast) both;
+}
+
+/* 相册按逻辑行窗口化：日期头占一行，一行放几个媒体项由面板宽度决定。
+ *
+ * 格子是**固定尺寸**而不是「一行三个各占 1/3」：面板宽度可变，按比例分会让缩略图
+ * 跟着面板缩放（装机反馈 2026-09-16，Screenshot_8 / 9）。现在宽度变化时换行，
+ * 格子本身不变形。
+ *
+ * `--flikky-album-tile` / gap / 日期行高这三个值 **JS 侧也有一份同名常量**
+ * （panel-album.js 的 TILE_PX / TILE_GAP_PX / DATE_ROW_PX）—— JS 需要它们才能算
+ * 每行几个与滚动区间，而读取实际布局在本项目已经错过两次。两处必须一起改，
+ * `panel-album.test.js` 有一条断言把它们钉在一起。
+ *
+ * `overflow-anchor: none`：窗口换行时浏览器的滚动锚定会跟着跳，表现为滚轮失灵。 */
+.fk-album-rows {
+  --flikky-album-tile: 116px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--flikky-listgroup-gap);
+  overflow-anchor: none;
+}
+.fk-album-vspace {
+  flex: none;
+  pointer-events: none;
+}
+.fk-album-date {
+  height: 44px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: end;
+  padding: var(--flikky-space-md) var(--flikky-space-sm) var(--flikky-space-xs);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  font: var(--flikky-type-label-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-large-tracking);
+}
+.fk-album-grid {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+.fk-album-tile {
+  position: relative;
+  flex: none;
+  width: var(--flikky-album-tile);
+  height: var(--flikky-album-tile);
+  overflow: hidden;
+  border-radius: var(--flikky-shape-sm);
+  background: rgb(var(--mdui-color-surface-container-high));
+  color: rgb(var(--mdui-color-on-surface));
+}
+.fk-album-open {
+  width: 100%;
+  height: 100%;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.fk-album-open > img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+.fk-album-open > .material-symbols-outlined {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+/* 选择角标：鼠标没有长按，所以选择需要自己的入口（App 端那边是长按）。
+ * 未选中时只在 hover / focus 时露出来，避免每个格子上常驻一个圆点。 */
+.fk-album-pick {
+  position: absolute;
+  top: var(--flikky-space-xs);
+  right: var(--flikky-space-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 0;
+  border-radius: var(--flikky-shape-full);
+  background: rgb(var(--mdui-color-scrim) / 0.55);
+  color: rgb(var(--mdui-color-surface));
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity var(--flikky-motion-effects-dur) var(--flikky-motion-effects-ease);
+}
+.fk-album-tile:hover .fk-album-pick,
+.fk-album-pick:focus-visible {
+  opacity: 1;
+}
+.fk-album-tile[data-selected="1"] .fk-album-pick {
+  opacity: 1;
+  background: rgb(var(--mdui-color-primary));
+  color: rgb(var(--mdui-color-on-primary));
+}
+.fk-album-tile[data-selected="1"] {
+  outline: 3px solid rgb(var(--mdui-color-primary));
+  outline-offset: -3px;
+}
+.fk-album-tile[data-selected="1"] .fk-album-open > img {
+  opacity: 0.72;
+}
+.fk-album-pick .material-symbols-outlined { font-size: 20px; }
+.fk-album-video {
+  position: absolute;
+  right: var(--flikky-space-xs);
+  bottom: var(--flikky-space-xs);
+  display: flex;
+  align-items: center;
+  gap: var(--flikky-space-xs);
+  padding: var(--flikky-space-xs) var(--flikky-space-sm);
+  border-radius: var(--flikky-shape-full);
+  background: rgb(var(--mdui-color-scrim) / 0.72);
+  color: rgb(var(--mdui-color-surface));
+  font: var(--flikky-type-label-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-small-tracking);
+}
+.fk-album-video .material-symbols-outlined { font-size: 16px; }
+.fk-album-footer {
+  margin: var(--flikky-space-lg) 0 var(--flikky-space-xl);
+  text-align: center;
+  color: rgb(var(--mdui-color-on-surface-variant));
+  font: var(--flikky-type-body-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-medium-tracking);
+}
+.fk-album-retry {
+  min-height: var(--flikky-size-touch);
+  margin: var(--flikky-space-md) auto var(--flikky-space-xl);
+  padding: 0 var(--flikky-space-lg);
+  display: block;
+  border: 0;
+  border-radius: var(--flikky-shape-full);
+  background: rgb(var(--mdui-color-secondary-container));
+  color: rgb(var(--mdui-color-on-secondary-container));
+  font: var(--flikky-type-label-large) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-label-large-tracking);
+  cursor: pointer;
+}
+@keyframes fk-files-enter {
+  from { opacity: 0; transform: translateX(var(--flikky-space-xl)); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes fk-files-exit {
+  from { opacity: 0; transform: translateX(calc(-1 * var(--flikky-space-xl))); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fk-files-list[data-dir='enter'],
+  .fk-files-list[data-dir='exit'] { animation: none; }
+}
+
+/* 列表进场：**逐行**淡入 + 轻微上移，按 --i 做阶梯延迟。
+ *
+ * 类名是 `.fk-list-in` 而不是 `.fk-files-list`：**文件面板与收藏面板共用这一条**
+ * （2026-09-02 用户要求两个面板观感一致）。收藏不做流式——数据本来就整份在内存里，
+ * 流式解决不了任何问题——但行入场是纯渲染层的事，可以照抄。
+ *
+ * 上一版这里是「整组淡入一次」，注释写的是「逐行 stagger 在几千行的目录里会把动画
+ * 拉成一场幻灯片，所以按组做一次」。那个顾虑是真的，但结论下错了——
+ * 正确答案不是放弃逐行，是**封顶**：JS 侧把 --i 钳在 0..8（CSS 没法 clamp 自定义
+ * 属性的整数），于是每批只有前 9 行依次落下，其余同时到。批与批之间的时间差由
+ * 流式追加本身提供，两者叠起来就是「列表持续向下生长」。
+ *
+ * 阶梯步长复用 chat.css 的 --flikky-stagger（含 --flikky-motion-scale，
+ * 所以 reduce-motion 下自动归零）。带 fallback 以免硬依赖那个文件的加载顺序。 */
+.fk-list-in > .fk-item {
+  /* fill-mode 必须是 `backwards`，**不能是 `both`**。
+   *
+   * `both` 含 `forwards`，末帧的 `transform: none` 在动画结束后永久生效；而 CSS 动画
+   * 的优先级压过普通声明，于是 `.fk-item:active { transform: scale(.985) }` 与相邻行
+   * 挤压在文件行上全部失效 —— 装机验收里「文件行没有收藏行那种点按效果」就是这个。
+   * 收藏行没有这条 animation，所以只有文件行不一致。
+   *
+   * `backwards` 只在**延迟期间**应用首帧（阶梯需要它，否则行会先以完全不透明闪一下），
+   * 动画结束后不再钉住任何属性。 */
+  animation: fk-list-row-in var(--flikky-spring-effects-default-dur)
+    var(--flikky-spring-effects-default) backwards;
+  animation-delay: calc(
+    var(--flikky-stagger, calc(40ms * var(--flikky-motion-scale, 1))) * var(--i, 0)
+  );
+}
+@keyframes fk-list-row-in {
+  from { opacity: 0; transform: translateY(var(--flikky-space-sm)); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fk-list-in > .fk-item { animation: none; }
+}
+
+/* 列表终止标记。流式加载下「列表停止生长」与「加载完了」在屏幕上长得一样，
+ * 用户无从判断自己是不是看到了全部 —— 这一行就是那个确定的答案。 */
+.fk-files-footer {
+  margin: var(--flikky-space-md) var(--flikky-space-lg) var(--flikky-space-xl);
+  text-align: center;
+  font: var(--flikky-type-body-medium) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-medium-tracking);
+  color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* 相册的两种视图：时间线与相册簿。切换行在两种视图里都在，进了某个簿之后
+ * 换成返回入口 —— 两个入口同时在会让「我现在在哪」变得不明确。 */
+.fk-album-views {
+  display: flex;
+  gap: var(--flikky-space-sm);
+  padding: var(--flikky-space-xs) 0 var(--flikky-space-sm);
+}
+/* 相册簿卡片也按固定宽度换行，与时间线的格子同一条规则。 */
+.fk-album-buckets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--flikky-space-md);
+}
+.fk-album-bucket {
+  width: 168px;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  padding: 0 0 var(--flikky-space-md);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--flikky-shape-md);
+  background: rgb(var(--mdui-color-surface-container-high));
+  color: rgb(var(--mdui-color-on-surface));
+  cursor: pointer;
+  text-align: start;
+}
+.fk-album-bucket > img {
+  width: 168px;
+  height: 168px;
+  display: block;
+  object-fit: cover;
+  background: rgb(var(--mdui-color-surface-container-highest));
+}
+.fk-album-bucket-name {
+  padding: var(--flikky-space-sm) var(--flikky-space-md) 0;
+  overflow: hidden;
+  font: var(--flikky-type-title-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-title-small-tracking);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fk-album-bucket-count {
+  padding: 0 var(--flikky-space-md);
+  color: rgb(var(--mdui-color-on-surface-variant));
+  font: var(--flikky-type-body-small) var(--flikky-font-family);
+  letter-spacing: var(--flikky-type-body-small-tracking);
+}

@@ -1,0 +1,170 @@
+package com.leoaristocrat.dashdrop.di
+
+import android.content.Context
+import androidx.datastore.preferences.preferencesDataStore
+import com.leoaristocrat.dashdrop.data.FavoriteFileStore
+import com.leoaristocrat.dashdrop.data.MediaStoreLibrary
+import com.leoaristocrat.dashdrop.data.SharedStorageBrowser
+import com.leoaristocrat.dashdrop.server.routes.MediaLibrary
+import com.leoaristocrat.dashdrop.server.routes.StorageBrowser
+import com.leoaristocrat.dashdrop.data.FavoritesRepository
+import com.leoaristocrat.dashdrop.data.SessionFileStore
+import com.leoaristocrat.dashdrop.data.SessionRepository
+import com.leoaristocrat.dashdrop.data.db.DashDropDatabase
+import com.leoaristocrat.dashdrop.data.settings.SettingsRepository
+import com.leoaristocrat.dashdrop.network.NetworkInfo
+import com.leoaristocrat.dashdrop.service.TransferController
+import com.leoaristocrat.dashdrop.session.SessionState
+import com.leoaristocrat.dashdrop.session.TransferStats
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+
+private val Context.settingsDataStore by preferencesDataStore(name = "dashdrop_settings")
+
+object ServiceLocator {
+    private lateinit var appContext: Context
+
+    /**
+     * 应用级后台作业 scope：给"必须完成、不随页面/ViewModel 取消"的收尾写库用
+     * （如软删除的提交落库——viewModelScope 在 onCleared 后已死，Screen 的
+     * rememberCoroutineScope 随 composition 取消，两者都保证不了执行）。
+     */
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    lateinit var session: SessionState
+        private set
+    lateinit var stats: TransferStats
+        private set
+    lateinit var fileStore: SessionFileStore
+        private set
+    lateinit var favoriteFileStore: FavoriteFileStore
+        private set
+    /**
+     * 共享存储的只读浏览入口。**这里是全项目唯一认识 `Environment` 的地方**——
+     * `SharedStorageBrowser` 本身零 Android 依赖，可在 JVM 上测。
+     *
+     * 根用 `Environment.getExternalStorageDirectory()` 而非硬编码 `/storage/emulated/0`：
+     * 后者在多用户 / 工作资料下是错的（第二用户是 `/storage/emulated/10`）。
+     */
+    lateinit var storageBrowser: StorageBrowser
+        private set
+    lateinit var mediaLibrary: MediaLibrary
+        private set
+    lateinit var networkInfo: NetworkInfo
+        private set
+    lateinit var database: DashDropDatabase
+        private set
+    lateinit var repository: SessionRepository
+        private set
+    lateinit var favoritesRepository: FavoritesRepository
+        private set
+    lateinit var settingsRepository: SettingsRepository
+        private set
+
+    /**
+     * 当前运行中的 [TransferController] 引用，由 [com.leoaristocrat.dashdrop.service.TransferService]
+     * 在 startTransfer 设置、stopActiveServer 清空。v1.3 撤回流程下，HistoryViewModel
+     * 不通过 service binding 而是直接从这里拿——撤回操作是单次调用且只读，
+     * binding 完整生命周期管理开销过大。
+     *
+     * 跨 Wi-Fi rebind 时 controller 实例不变（service 内部 field 复用），所以这里
+     * 不需要 lambda 间接访问（CLAUDE.md 跨-rebind 规范针对的是 KtorServer 内部
+     * 成员，TransferController 本身跨 rebind 同一实例）。
+     */
+    @Volatile var currentController: TransferController? = null
+
+    /**
+     * v1.3 对端撤回通知渠道。TransferService 在 onRecallMessage 桥接
+     * 成功撤回时 emit；ServingViewModel 监听后弹 snackbar。
+     * extraBufferCapacity 避免 tryEmit 在无 collector 时丢弃。
+     */
+    private val _recallNotifications = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+    val recallNotifications: SharedFlow<Unit> = _recallNotifications.asSharedFlow()
+    fun notifyRecall() { _recallNotifications.tryEmit(Unit) }
+
+    /**
+     * 连接卡片上的「改用 N」（传输、导出共用）：把本次会话实际用的编号写回设置，并立刻收起提示。
+     * 走 appScope：点完马上离开页面，写入也不能丢。
+     */
+    fun adoptHostNumber(number: Int) {
+        session.adoptLocalName(number)
+        appScope.launch { settingsRepository.setHostNumber(number) }
+    }
+
+    /**
+     * 「显示隐藏文件」的当前值，供 server 侧的 [SharedStorageBrowser] 同步读取。
+     *
+     * 那个对象在非 suspend 的列举路径上跑，拿不到 DataStore 的 Flow；
+     * [TransferService] 已经在收集设置，这里由它顺手写进来。
+     */
+    @Volatile
+    var latestShowHiddenFiles: Boolean = false
+
+    fun init(app: Context) {
+        appContext = app.applicationContext
+        session = SessionState(nowMs = System::currentTimeMillis)
+        stats = TransferStats(nowMs = System::currentTimeMillis)
+        fileStore = SessionFileStore(filesDir = appContext.filesDir, cacheDir = appContext.cacheDir)
+        favoriteFileStore = FavoriteFileStore(filesDir = appContext.filesDir)
+        // showHidden 用 lambda 而不是当场取值：settingsRepository 在它之后才建，
+        // 而且设置随时可改，每次列举都该看当前值。
+        storageBrowser = SharedStorageBrowser(
+            root = android.os.Environment.getExternalStorageDirectory(),
+            showHidden = { latestShowHiddenFiles },
+        )
+        mediaLibrary = MediaStoreLibrary(appContext.contentResolver)
+        networkInfo = NetworkInfo(appContext)
+        database = DashDropDatabase.build(appContext)
+        val oldDs = java.io.File(appContext.filesDir, "datastore/flikky_settings.preferences_pb")
+        val newDs = java.io.File(appContext.filesDir, "datastore/dashdrop_settings.preferences_pb")
+        if (oldDs.exists() && !newDs.exists()) {
+            oldDs.renameTo(newDs)
+        }
+        settingsRepository = SettingsRepository(appContext.settingsDataStore)
+        repository = SessionRepository(
+            sessionDao = database.sessionDao(),
+            messageDao = database.messageDao(),
+            groupDao = database.groupDao(),
+            fileStore = fileStore,
+            now = System::currentTimeMillis,
+            retainLimitProvider = { settingsRepository.settings.first().historyRetainLimit },
+        )
+        favoritesRepository = FavoritesRepository(
+            favoriteDao = database.favoriteDao(),
+            favoriteGroupDao = database.favoriteGroupDao(),
+            sessionFileStore = fileStore,
+            favoriteFileStore = favoriteFileStore,
+            now = System::currentTimeMillis,
+        )
+    }
+
+    fun context(): Context = appContext
+
+    /**
+     * 复用同一 SessionState / TransferStats 实例，仅清零内部状态。
+     *
+     * v1.1 时这里替换实例，但 HomeViewModel / ExportingViewModel 等都在构造
+     * 时缓存了 ServiceLocator.session 引用——reset 后它们就指向"死实例"，
+     * 导致 v1.2 出现：HomeViewModel.armExport 写旧实例，TransferService 读
+     * 新实例发现 Idle 直接 stopSelf 没调 startForeground → 5 秒后崩。
+     *
+     * 同样原因导致停服后 HomeViewModel.isTransferOrExportRunning 仍误报
+     * "正在运行"（旧实例的 currentSessionId 残留）。
+     */
+    /**
+     * 注意：不在这里调 session.clearExport()。当服务因 zip 发完而 stopSelf 时，
+     * exportMode 必须保持 Done(session) 让 ExportingScreen 渲染 "保留 / 删除"
+     * 二择屏；只有用户 acknowledge（acknowledge() 或新一轮 startExport 兜底）
+     * 才清。`isTransferOrExportRunning()` 把 Done 视为已结束，下次启动不被阻塞。
+     */
+    fun reset() {
+        session.reset()
+        stats.reset()
+        currentController = null
+    }
+}

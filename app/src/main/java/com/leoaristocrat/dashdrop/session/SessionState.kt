@@ -1,0 +1,267 @@
+package com.leoaristocrat.dashdrop.session
+
+import com.leoaristocrat.dashdrop.export.ExportMode
+import com.leoaristocrat.dashdrop.export.ExportSession
+import com.leoaristocrat.dashdrop.export.ExportSnapshot
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+
+/**
+ * Lifecycle of the Wi-Fi link under the running server, exposed to the UI so
+ * ServingScreen / ExportingScreen can render a status banner.
+ *
+ *  - [Ok]: IPv4 hasn't changed since the server was bound.
+ *  - [Switching]: a rebind is in progress (Ktor stopped, new engine not up yet).
+ *  - [Lost]: we used to have IPv4 and now don't — user probably lost Wi-Fi.
+ *  - [Switched]: rebind finished; UI shows the new URL + "我知道了" button
+ *    whose callback is [SessionState.acknowledgeNetworkSwitch].
+ */
+sealed class NetworkStatus {
+    object Ok : NetworkStatus()
+    object Switching : NetworkStatus()
+    object Lost : NetworkStatus()
+    data class Switched(val newUrl: String) : NetworkStatus()
+}
+
+class SessionState(private val nowMs: () -> Long) {
+
+    private val _fileTransferProgress = MutableStateFlow<Map<Long, Float>>(emptyMap())
+    val fileTransferProgress: StateFlow<Map<Long, Float>> = _fileTransferProgress
+
+    fun updateProgress(messageId: Long, progress: Float) {
+        _fileTransferProgress.update { it + (messageId to progress) }
+    }
+
+    fun clearProgress(messageId: Long) {
+        _fileTransferProgress.update { it - messageId }
+    }
+
+    data class Snapshot(
+        val serviceStartedAt: Long,
+        val currentSessionId: Long?,
+        val messages: List<Message>,
+        val clientConnected: Boolean,
+        /**
+         * Port the in-process Ktor server is actually bound to, or 0 when no
+         * server is up. KtorServer scans [8080, 8099] for the first free port,
+         * so this is the only authoritative source for the URL shown in the UI.
+         * Defaulted so existing test sites (and older snapshots) behave unchanged.
+         */
+        val boundPort: Int = 0,
+        /**
+         * Current network link status — drives the status banner in
+         * ServingScreen / ExportingScreen. Defaulted so older tests and
+         * snapshot consumers stay unchanged.
+         */
+        val networkStatus: NetworkStatus = NetworkStatus.Ok,
+        /** 用户设定的起始端口；与 [boundPort] 不同时连接卡片提示。0 = 未知。 */
+        val requestedPort: Int = 0,
+        val localName: LocalNameStatus = LocalNameStatus.Disabled,
+    )
+
+    private val _snapshot = MutableStateFlow(
+        Snapshot(
+            serviceStartedAt = nowMs(),
+            currentSessionId = null,
+            messages = emptyList(),
+            clientConnected = false,
+            boundPort = 0,
+            networkStatus = NetworkStatus.Ok,
+        )
+    )
+    val snapshot: StateFlow<Snapshot> = _snapshot
+
+    fun startNew(sessionId: Long) {
+        _snapshot.value = Snapshot(
+            serviceStartedAt = nowMs(),
+            currentSessionId = sessionId,
+            messages = emptyList(),
+            clientConnected = false,
+            boundPort = 0,
+            networkStatus = NetworkStatus.Ok,
+        )
+    }
+
+    /**
+     * Called by [com.leoaristocrat.dashdrop.service.TransferService] right after
+     * [com.leoaristocrat.dashdrop.server.KtorServer.start] returns the actual bound
+     * port — for both transfer and export modes. UI layer reads this to build
+     * the browser URL. Resets to 0 on [reset].
+     */
+    fun updateBoundPort(port: Int) {
+        _snapshot.update { it.copy(boundPort = port) }
+    }
+
+    fun updateRequestedPort(port: Int) {
+        _snapshot.update { it.copy(requestedPort = port) }
+    }
+
+    /**
+     * 「改用 N」：设置已写成本次实际用的编号 → 提示立刻收起，不必等重启。
+     * 只在当前确实是 `Renamed(_, number)` 时改，别的状态原样不动。
+     */
+    fun adoptLocalName(number: Int) {
+        _snapshot.update {
+            val current = it.localName
+            if (current is LocalNameStatus.Renamed && current.actual == number) {
+                it.copy(localName = LocalNameStatus.Owned(number))
+            } else {
+                it
+            }
+        }
+    }
+
+    fun updateLocalName(status: LocalNameStatus) {
+        _snapshot.update { it.copy(localName = status) }
+    }
+
+    /**
+     * Insert [msg] in timestamp order so that a message restored via undo-delete
+     * lands back at its original position rather than being appended to the end.
+     *
+     * Normal new messages always arrive with monotonically increasing timestamps,
+     * so sorted-insert is equivalent to append for the common case — no behaviour
+     * change there.  Only a restored message (with its original, older timestamp)
+     * will slot back into the middle of the list.
+     */
+    fun addMessage(msg: Message) {
+        _snapshot.update { snap ->
+            val list = snap.messages
+            // Binary-search for the insertion index to keep list timestamp-sorted.
+            var lo = 0; var hi = list.size
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                if (list[mid].timestamp <= msg.timestamp) lo = mid + 1 else hi = mid
+            }
+            snap.copy(messages = list.toMutableList().also { it.add(lo, msg) })
+        }
+    }
+
+    fun updateMessage(id: Long, transform: (Message) -> Message) {
+        _snapshot.update { s ->
+            s.copy(messages = s.messages.map { if (it.id == id) transform(it) else it })
+        }
+    }
+
+    /**
+     * v1.3 撤回内存同步：从当前会话的消息列表里移除指定消息。
+     * TransferController.recallMessage 在 repository 真删 DB 后调用，让
+     * ServingScreen / WS 广播都能立即反映"消息消失"。
+     */
+    fun removeMessage(id: Long) {
+        _snapshot.update { s ->
+            s.copy(messages = s.messages.filterNot { it.id == id })
+        }
+    }
+
+    fun setClientConnected(connected: Boolean) {
+        _snapshot.update { it.copy(clientConnected = connected) }
+    }
+
+    fun reset() {
+        _snapshot.value = Snapshot(
+            serviceStartedAt = nowMs(),
+            currentSessionId = null,
+            messages = emptyList(),
+            clientConnected = false,
+            boundPort = 0,
+            networkStatus = NetworkStatus.Ok,
+        )
+        _fileTransferProgress.value = emptyMap()
+        _peerAvatarId.value = 0
+        _peerAvatarKey.value = "icon:desktop_windows"
+    }
+
+    /**
+     * Set the current network link status. Called from TransferService's
+     * NetworkCallback as the rebinder decides Ok/Switching/Lost/Switched.
+     */
+    fun updateNetworkStatus(status: NetworkStatus) {
+        _snapshot.update { it.copy(networkStatus = status) }
+    }
+
+    /**
+     * UI's "我知道了" button on the Switched banner folds state back to Ok.
+     * No-op when the status is already Ok; from Switching/Lost we also allow
+     * the ack to demote to Ok (the banner is advisory, not authoritative).
+     */
+    fun acknowledgeNetworkSwitch() {
+        _snapshot.update { it.copy(networkStatus = NetworkStatus.Ok) }
+    }
+
+    // M9: browser-side avatar chosen by the PC user, received via client_hello WS frame.
+    private val _peerAvatarId = MutableStateFlow(0)
+    val peerAvatarId: StateFlow<Int> = _peerAvatarId.asStateFlow()
+
+    fun setPeerAvatar(id: Int) { _peerAvatarId.value = id }
+
+    private val _peerAvatarKey = MutableStateFlow("icon:desktop_windows")
+    val peerAvatarKey: StateFlow<String> = _peerAvatarKey.asStateFlow()
+
+    fun setPeerAvatarKey(key: String) { _peerAvatarKey.value = key }
+
+    private val _exportMode = MutableStateFlow<ExportMode>(ExportMode.Idle)
+    val exportMode: StateFlow<ExportMode> = _exportMode
+
+    /**
+     * 从 Idle 迁移到 Armed，备好 PIN + snapshot 等浏览器来连。
+     * 若当前非 Idle（已有导出在进行）→ 抛 IllegalStateException，调用方负责先 clear。
+     */
+    fun armExport(session: ExportSession, snapshot: ExportSnapshot) {
+        val current = _exportMode.value
+        check(current is ExportMode.Idle) {
+            "armExport requires Idle state, was $current"
+        }
+        _exportMode.value = ExportMode.Armed(session, snapshot)
+    }
+
+    /**
+     * 从 Armed 迁移到 Sending；再调进一步更新字节进度。
+     * 状态不匹配抛 IllegalStateException。
+     */
+    fun updateExportProgress(bytesSent: Long, totalBytes: Long) {
+        val session = when (val current = _exportMode.value) {
+            is ExportMode.Armed -> current.session
+            is ExportMode.Sending -> current.session
+            else -> throw IllegalStateException(
+                "updateExportProgress requires Armed or Sending, was $current"
+            )
+        }
+        _exportMode.value = ExportMode.Sending(
+            session = session,
+            bytesSent = bytesSent,
+            totalBytes = totalBytes,
+        )
+    }
+
+    /**
+     * 从 Sending 迁移到 Done。状态不匹配抛 IllegalStateException。
+     */
+    fun markExportDone() {
+        val current = _exportMode.value
+        check(current is ExportMode.Sending) {
+            "markExportDone requires Sending state, was $current"
+        }
+        _exportMode.value = ExportMode.Done(current.session)
+    }
+
+    /**
+     * 回到 Idle。从任何状态调用都合法，幂等——用户点"取消"、zip 发完后服务停、
+     * APP 崩恢复时都走这里。
+     */
+    fun clearExport() {
+        _exportMode.value = ExportMode.Idle
+    }
+
+    fun updateExportPin(pin: String) {
+        _exportMode.update { mode ->
+            when (mode) {
+                is ExportMode.Armed -> mode.copy(session = mode.session.copy(pin = pin))
+                is ExportMode.Sending -> mode.copy(session = mode.session.copy(pin = pin))
+                else -> mode
+            }
+        }
+    }
+}

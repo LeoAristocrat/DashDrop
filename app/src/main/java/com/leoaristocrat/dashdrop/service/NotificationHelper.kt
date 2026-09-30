@@ -1,0 +1,45 @@
+package com.leoaristocrat.dashdrop.service
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import com.leoaristocrat.dashdrop.MainActivity
+import com.leoaristocrat.dashdrop.R
+
+object NotificationHelper {
+    const val CHANNEL_ID = "dashdrop_service"
+    const val NOTIFICATION_ID = 1001
+
+    fun ensureChannel(context: Context) {
+        val nm = context.getSystemService(NotificationManager::class.java)
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            context.getString(R.string.service_channel_name),
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = context.getString(R.string.service_channel_description)
+            setShowBadge(false)
+        }
+        nm.createNotificationChannel(channel)
+    }
+
+    fun build(context: Context, title: String, text: String): Notification {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pi = PendingIntent.getActivity(
+            context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        return Notification.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            .setOngoing(true)
+            .setContentIntent(pi)
+            .build()
+    }
+}

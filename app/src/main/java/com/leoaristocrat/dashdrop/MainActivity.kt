@@ -1,0 +1,314 @@
+package com.leoaristocrat.dashdrop
+
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.leoaristocrat.dashdrop.data.settings.DashDropSettings
+import com.leoaristocrat.dashdrop.di.ServiceLocator
+import com.leoaristocrat.dashdrop.ui.components.DashDropNavBar
+import com.leoaristocrat.dashdrop.ui.components.UpdateAvailableDialog
+import com.leoaristocrat.dashdrop.ui.components.dashdropNavTransitions
+import com.leoaristocrat.dashdrop.ui.exporting.ExportingScreen
+import com.leoaristocrat.dashdrop.ui.favorites.FavoritesScreen
+import com.leoaristocrat.dashdrop.ui.files.FilesScreen
+import com.leoaristocrat.dashdrop.ui.history.HistoryScreen
+import com.leoaristocrat.dashdrop.ui.home.HomeScreen
+import com.leoaristocrat.dashdrop.ui.serving.ServingScreen
+import com.leoaristocrat.dashdrop.ui.settings.SettingsScreen
+import com.leoaristocrat.dashdrop.ui.theme.DashDropTheme
+import com.leoaristocrat.dashdrop.ui.theme.Motion
+import com.leoaristocrat.dashdrop.network.UpdateChecker
+import com.leoaristocrat.dashdrop.network.UpdateInfo
+import com.leoaristocrat.dashdrop.util.UpdateCheckPolicy
+import com.leoaristocrat.dashdrop.util.UpdateVersion
+import com.leoaristocrat.dashdrop.data.revokeUnavailablePeerGates
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        // 去掉系统导航栏的对比度浮层（三键导航/手势线），让 App 自己的底栏/内容颜色铺到屏幕最底，
+        // 系统栏背景与 App 一致，不再割裂。配合 Theme 里的 isAppearanceLightNavigationBars 保证图标可读。
+        window.isNavigationBarContrastEnforced = false
+
+        setContent {
+            val settings by ServiceLocator.settingsRepository.settings
+                .collectAsState(initial = DashDropSettings())
+            // D76 fail-closed 的第二个触发点：对端开关值一变就复查。导入备份在前台完成、
+            // 不经过 onResume —— 只靠 onResume 的话，导入的「开」会躲在不可用态后面。
+            LaunchedEffect(
+                settings.storageBrowsingEnabled,
+                settings.albumBrowsingEnabled,
+                settings.favoriteBrowsingEnabled,
+            ) {
+                ServiceLocator.settingsRepository.revokeUnavailablePeerGates(applicationContext)
+            }
+            DashDropTheme(settings) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) {
+                    val nav = rememberNavController()
+                    val backStackEntry by nav.currentBackStackEntryAsState()
+                    val currentRoute = backStackEntry?.destination?.route
+                    val topLevel = currentRoute == "transfer" ||
+                        (settings.favoriteBetaEnabled && currentRoute == "favorites") ||
+                        currentRoute == "settings"
+
+                    // 传输会话进行中（currentSessionId != null，与 HomeViewModel 同一信号）时锁定
+                    // 底栏「设置」入口，避免会话期间误入设置改动配置。服务停止后自动解锁。
+                    val sessionSnap by ServiceLocator.session.snapshot.collectAsState()
+                    val servingActive = sessionSnap.currentSessionId != null
+
+                    var autoUpdateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+                    LaunchedEffect(Unit) {
+                        val repository = ServiceLocator.settingsRepository
+                        val current = repository.settings.first()
+                        val shouldCheck = UpdateCheckPolicy.shouldAutoCheck(
+                            enabled = current.autoCheckUpdate,
+                            lastCheckAtMs = repository.lastUpdateCheckAt(),
+                            nowMs = System.currentTimeMillis(),
+                        )
+                        if (!shouldCheck) return@LaunchedEffect
+
+                        val info = UpdateChecker().check() ?: return@LaunchedEffect
+                        if (UpdateVersion.parse(info.tagName) == null) {
+                            return@LaunchedEffect
+                        }
+                        repository.setLastUpdateCheckAt(System.currentTimeMillis())
+                        val versionName = runCatching {
+                            packageManager
+                                .getPackageInfo(
+                                    packageName,
+                                    PackageManager.PackageInfoFlags.of(0),
+                                )
+                                .versionName
+                        }.getOrNull()
+                        if (UpdateVersion.isNewer(info.tagName, versionName) &&
+                            UpdateCheckPolicy.shouldAutoPrompt(
+                                info.tagName,
+                                repository.lastPromptedUpdateVersion(),
+                            )
+                        ) {
+                            repository.setLastPromptedUpdateVersion(info.tagName)
+                            autoUpdateInfo = info
+                        }
+                    }
+
+                    autoUpdateInfo?.let { info ->
+                        UpdateAvailableDialog(
+                            info = info,
+                            onConfirm = {
+                                autoUpdateInfo = null
+                                runCatching {
+                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.htmlUrl)))
+                                }
+                            },
+                            onDismiss = { autoUpdateInfo = null },
+                        )
+                    }
+
+                    var homeSelecting by remember { mutableStateOf(false) }
+                    // 主页搜索展开时也隐藏底栏，让搜索铺满全屏。
+                    var homeSearchExpanded by remember { mutableStateOf(false) }
+                    var favoritesSelecting by remember { mutableStateOf(false) }
+                    var favoritesSearchExpanded by remember { mutableStateOf(false) }
+                    var pendingSessionExportSelection by remember { mutableStateOf(false) }
+
+                    Scaffold(
+                        bottomBar = {
+                            // 底栏显隐：返回（出现）用 expandVertically+fade 平滑展开；离开（隐藏）用
+                            // ExitTransition.None 瞬时收起。原因：离开总有「接替它的元素」盖住（多选时浮动栏
+                            // 滑入、搜索展开时铺满全屏），用户感知不到突兀；反而若让 bottomBar 槽位带动画收起，
+                            // 上方内容区底缘（多选浮动栏的 align(BottomCenter) 锚点）会在收起过程中持续移动，
+                            // 使浮动栏「先现于高处、再随锚点下移闪一下」——在有手势线/导航键的机子上尤其明显
+                            // （锚点终点更低，落差更大）。瞬时收起让锚点从第 0 帧就稳定在最终位，浮动栏直线滑到位。
+                            AnimatedVisibility(
+                                visible = topLevel &&
+                                    !homeSelecting &&
+                                    !homeSearchExpanded &&
+                                    !favoritesSelecting &&
+                                    !favoritesSearchExpanded,
+                                enter = expandVertically(Motion.effects()) + fadeIn(Motion.effects()),
+                                exit = ExitTransition.None,
+                            ) {
+                                DashDropNavBar(
+                                    currentRoute = currentRoute,
+                                    settingsEnabled = !servingActive,
+                                    favoritesEnabled = settings.favoriteBetaEnabled,
+                                ) { dest ->
+                                    nav.navigate(dest) {
+                                        launchSingleTop = true
+                                        restoreState = true
+                                        popUpTo(nav.graph.startDestinationId) { saveState = true }
+                                    }
+                                }
+                            }
+                        },
+                    ) { innerPadding ->
+                        // 拿完整 innerPadding 的目的地必须**同时 consume**：padding 只是
+                        // 留出空白、不算「已处理」，于是它们自带的 Scaffold 会把 systemBars
+                        // 再留一次 —— 状态栏高度被算两次，顶部多出一条空白
+                        // （2026-09-09 装机反馈 Screenshot_17 框 1）。
+                        // 四个目的地都自带 Scaffold：serving / exporting / files / history。
+                        // 守卫见 ui/NestedScaffoldInsetTest。
+                        // 逐目的地施加 padding（而非给整个 NavHost），让主页能 escape 顶部 status bar inset：
+                        // - 主页：交给 SearchBar 自己处理顶部 inset（折叠时落在状态栏下、展开时铺到状态栏下方）；
+                        //   只补底部 inset；搜索展开时连底部也不留 → 真全屏铺满。
+                        // - 其余页面：拿到与之前完全一致的 innerPadding（零回归）。
+                        val navTransitions = dashdropNavTransitions()
+                        NavHost(
+                            navController = nav,
+                            startDestination = "transfer",
+                            enterTransition = navTransitions.enter,
+                            exitTransition = navTransitions.exit,
+                            popEnterTransition = navTransitions.popEnter,
+                            popExitTransition = navTransitions.popExit,
+                        ) {
+                            composable("transfer") {
+                                val homePadding = if (homeSearchExpanded) PaddingValues(0.dp)
+                                    else PaddingValues(bottom = innerPadding.calculateBottomPadding())
+                                Box(Modifier.padding(homePadding)) {
+                                    HomeScreen(
+                                        onOpenSession = { id -> nav.navigate("history/$id") },
+                                        onStartService = { nav.navigate("serving") },
+                                        onStartExport = { nav.navigate("exporting") },
+                                        onOpenFiles = { nav.navigate("files") },
+                                        onSelectingChange = { homeSelecting = it },
+                                        onSearchExpandedChange = { homeSearchExpanded = it },
+                                        onOpenSearchHit = { sessionId, messageId ->
+                                            nav.navigate("history/$sessionId?highlight=$messageId")
+                                        },
+                                        startSelecting = pendingSessionExportSelection,
+                                        onStartSelectingConsumed = {
+                                            pendingSessionExportSelection = false
+                                        },
+                                    )
+                                }
+                            }
+                            composable("settings") {
+                                // 顶部 inset 交给 SettingsScreen 的 LargeTopAppBar 自己消费（标题栏铺到状态栏下方），这里只补底部。
+                                Box(Modifier.padding(bottom = innerPadding.calculateBottomPadding())) {
+                                    SettingsScreen(
+                                        onExportSessions = {
+                                            pendingSessionExportSelection = true
+                                            nav.navigate("transfer") {
+                                                launchSingleTop = true
+                                                restoreState = true
+                                                popUpTo(nav.graph.startDestinationId) { saveState = true }
+                                            }
+                                        },
+                                        onExportReady = { nav.navigate("exporting") },
+                                        onOpenFiles = { nav.navigate("files") },
+                                    )
+                                }
+                            }
+                            composable("favorites") {
+                                Box(Modifier.padding(bottom = innerPadding.calculateBottomPadding())) {
+                                    if (settings.favoriteBetaEnabled) {
+                                        FavoritesScreen(
+                                            onSelectingChange = { favoritesSelecting = it },
+                                            onSearchExpandedChange = { favoritesSearchExpanded = it },
+                                            onExportReady = { nav.navigate("exporting") },
+                                        )
+                                    } else {
+                                        LaunchedEffect(Unit) {
+                                            nav.navigate("transfer") {
+                                                launchSingleTop = true
+                                                popUpTo("transfer") { inclusive = false }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            composable("serving") {
+                                Box(Modifier.padding(innerPadding).consumeWindowInsets(innerPadding)) {
+                                    ServingScreen(onStopped = { nav.popBackStack("transfer", inclusive = false) })
+                                }
+                            }
+                            composable("exporting") {
+                                Box(Modifier.padding(innerPadding).consumeWindowInsets(innerPadding)) {
+                                    ExportingScreen(
+                                        onBack = { nav.popBackStack("transfer", inclusive = false) },
+                                    )
+                                }
+                            }
+                            composable("files") {
+                                Box(Modifier.padding(innerPadding).consumeWindowInsets(innerPadding)) {
+                                    FilesScreen(
+                                        onBack = { nav.popBackStack() },
+                                        onOpenMessage = { sessionId, messageId ->
+                                            nav.navigate("history/$sessionId?highlight=$messageId")
+                                        },
+                                    )
+                                }
+                            }
+                            composable(
+                                route = "history/{id}?highlight={messageId}",
+                                arguments = listOf(
+                                    navArgument("id") { type = NavType.LongType },
+                                    navArgument("messageId") {
+                                        type = NavType.LongType
+                                        defaultValue = -1L
+                                    },
+                                ),
+                            ) { backStack ->
+                                val id = backStack.arguments!!.getLong("id")
+                                val highlight = backStack.arguments!!.getLong("messageId").takeIf { it > 0L }
+                                Box(Modifier.padding(innerPadding).consumeWindowInsets(innerPadding)) {
+                                    HistoryScreen(
+                                        sessionId = id,
+                                        highlightMessageId = highlight,
+                                        onStartExport = { nav.navigate("exporting") },
+                                        onBack = { nav.popBackStack() },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // D76 fail-closed：系统权限可能在 App 不在前台时被撤销。放在 Activity 而不是某个页面，
+        // 用户停在哪一页回来都会复查；权限弹窗关闭也会走到这里。
+        ServiceLocator.appScope.launch {
+            ServiceLocator.settingsRepository.revokeUnavailablePeerGates(applicationContext)
+        }
+    }
+}

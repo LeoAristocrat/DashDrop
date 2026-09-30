@@ -1,0 +1,227 @@
+// One-shot generator: emit the web-side design-token file (tokens.css) FROM the
+// App-side Kotlin token constants, so a shape/spacing change lives in exactly one
+// place (the .kt sources) and both platforms stay in sync. Run after editing
+// Shape.kt / Spacing.kt:  node scripts/gen_web_tokens.mjs
+//
+// Colors are intentionally NOT emitted here: app.css already uses
+// rgb(var(--mdui-color-*)), and the phone pushes the theme seed via peer-info so
+// MDUI re-derives a matching palette (shared Material Color Utilities). Typography
+// maps onto MDUI's own --mdui-typescale-* (already value-identical to the App's MD3
+// scale), so it needs no per-value emission — only stable semantic aliases.
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const APP = join(ROOT, 'app/src/main/java/com/leoaristocrat/dashdrop');
+const OUT = join(ROOT, 'app/src/main/assets/web/tokens.css');
+
+// --- Parse App token constants (single source of truth) ---------------------
+
+// Shape.kt:  extraSmall = RoundedCornerShape(8.dp), ...
+function parseShapes() {
+  const kt = readFileSync(`${APP}/ui/theme/Shape.kt`, 'utf8');
+  const re = /(\w+)\s*=\s*RoundedCornerShape\((\d+)\.dp\)/g;
+  const map = {};
+  let m;
+  while ((m = re.exec(kt)) !== null) map[m[1]] = Number(m[2]);
+  return map; // { extraSmall, small, medium, large, extraLarge }
+}
+
+// Spacing.kt:  val xs = 4.dp, ...  (only the raw-dp tokens; aliases handled below)
+function parseSpacing() {
+  const kt = readFileSync(`${APP}/ui/theme/Spacing.kt`, 'utf8');
+  const re = /val (\w+)\s*=\s*(\d+)\.dp/g;
+  const map = {};
+  let m;
+  while ((m = re.exec(kt)) !== null) map[m[1]] = Number(m[2]);
+  return map; // { xs, sm, md, lg, xl, xxl, xxxl }
+}
+
+// DashDropSettings.kt:  const val BUBBLE_CORNER_DEFAULT = 18
+function parseBubbleDefault() {
+  const kt = readFileSync(`${APP}/data/settings/DashDropSettings.kt`, 'utf8');
+  const m = kt.match(/const val BUBBLE_CORNER_DEFAULT\s*=\s*(\d+)/);
+  if (!m) throw new Error('BUBBLE_CORNER_DEFAULT not found in DashDropSettings.kt');
+  return Number(m[1]);
+}
+
+// Type.kt:  displayLarge = TextStyle(fontFamily = ..., fontWeight = FontWeight.Normal,
+//           fontSize = 57.sp, lineHeight = 64.sp, letterSpacing = (-0.25).sp, ...), — fields
+// appear in this fixed order inside every TextStyle(...) block, so a single non-greedy regex
+// pass pairs each field with the block it belongs to.
+//
+// fontWeight matters here, not just size/lineHeight/tracking: titleMedium, titleSmall and all
+// three label styles use FontWeight.Medium, not Normal. Dropping it would make the emitted
+// `--flikky-type-*` shorthand default to weight 400 wherever it's consumed — a silent,
+// untested drift between the App and the browser (see collab-log for this exact bug).
+const FONT_WEIGHTS = { Normal: 400, Medium: 500, Bold: 700 };
+function parseTypeScale() {
+  const kt = readFileSync(`${APP}/ui/theme/Type.kt`, 'utf8');
+  const re = /(\w+)\s*=\s*TextStyle\(\s*fontFamily[\s\S]*?fontWeight\s*=\s*FontWeight\.(\w+)[\s\S]*?fontSize\s*=\s*([\d.]+)\.sp[\s\S]*?lineHeight\s*=\s*([\d.]+)\.sp[\s\S]*?letterSpacing\s*=\s*(\([^)]*\)|[\d.]+)\.sp/g;
+  const map = {};
+  let m;
+  while ((m = re.exec(kt)) !== null) {
+    const [, name, weightName, size, lineHeight, rawTracking] = m;
+    const weight = FONT_WEIGHTS[weightName];
+    if (weight === undefined) {
+      throw new Error(
+        `Type.kt token ${name} uses FontWeight.${weightName}, which gen_web_tokens.mjs has no ` +
+        `CSS mapping for. Known: ${Object.keys(FONT_WEIGHTS).join(', ')}. Add the mapping ` +
+        `deliberately — do not guess a number.`,
+      );
+    }
+    const tracking = rawTracking.startsWith('(') ? rawTracking.slice(1, -1) : rawTracking;
+    map[name] = { weight, size: Number(size), lineHeight: Number(lineHeight), tracking: Number(tracking) };
+  }
+  return map; // { displayLarge: { weight, size, lineHeight, tracking }, ... }
+}
+
+// camelCase (Type.kt style) -> kebab-case (CSS custom property style)
+const toKebab = (name) => name.replace(/([A-Z])/g, '-$1').toLowerCase();
+
+const shapes = parseShapes();
+const spacing = parseSpacing();
+const bubbleDefault = parseBubbleDefault();
+const typeScale = parseTypeScale();
+
+// --- Sanity checks (fail loud on drift, mirroring gen_schemes.mjs) -----------
+
+const SHAPE_KEYS = ['extraSmall', 'small', 'medium', 'large', 'extraLarge'];
+const SPACE_KEYS = ['xs', 'sm', 'md', 'lg', 'xl', 'xxl', 'xxxl'];
+for (const k of SHAPE_KEYS) {
+  if (typeof shapes[k] !== 'number') throw new Error(`Shape.kt missing token: ${k}`);
+}
+for (const k of SPACE_KEYS) {
+  if (typeof spacing[k] !== 'number') throw new Error(`Spacing.kt missing token: ${k}`);
+}
+if (bubbleDefault < 8 || bubbleDefault > 28) {
+  throw new Error(`BUBBLE_CORNER_DEFAULT ${bubbleDefault} outside expected 8..28`);
+}
+
+const TYPE_KEYS = [
+  'displayLarge', 'displayMedium', 'displaySmall',
+  'headlineLarge', 'headlineMedium', 'headlineSmall',
+  'titleLarge', 'titleMedium', 'titleSmall',
+  'bodyLarge', 'bodyMedium', 'bodySmall',
+  'labelLarge', 'labelMedium', 'labelSmall',
+];
+for (const k of TYPE_KEYS) {
+  if (!typeScale[k]) throw new Error(`Type.kt missing token: ${k}`);
+}
+
+// --- Emit tokens.css ---------------------------------------------------------
+
+const out = `/* AUTO-GENERATED by scripts/gen_web_tokens.mjs from the App Kotlin token
+ * constants (ui/theme/Shape.kt, ui/theme/Spacing.kt, data/settings/FlikkySettings.kt).
+ * DO NOT EDIT BY HAND — edit the .kt sources and re-run the script.
+ *
+ * Flikky 跨端共享 design token —— Web 侧单一事实源（SSOT）。两端一致的做法：
+ * 改 App 的 Shape.kt / Spacing.kt 常量 → 重跑 node scripts/gen_web_tokens.mjs → 两端同步。
+ *
+ * 颜色不在此层：app.css 已全用 rgb(var(--mdui-color-*))，手机通过 peer-info 推 seed，
+ * MDUI 用 Material Color Utilities 从同一 seed 重算 → 双端同色相。
+ * 排版复用 MDUI 自带 --mdui-typescale-*（已与 App MD3 type scale 逐值相等），此处只留语义别名。
+ */
+
+:root {
+  /* ── Shape（对齐 Shape.kt）── 用自有 --flikky-shape-* 精确对齐 App 档位
+   * （App small=${shapes.small}dp vs MDUI shape-corner-small=8px）。 */
+  --flikky-shape-xs: ${shapes.extraSmall}px;
+  --flikky-shape-sm: ${shapes.small}px;
+  --flikky-shape-md: ${shapes.medium}px;
+  --flikky-shape-lg: ${shapes.large}px;
+  --flikky-shape-xl: ${shapes.extraLarge}px;
+
+  /* ── Spacing（对齐 Spacing.kt 的 T 恤尺码 + 语义别名）── */
+  --flikky-space-xs: ${spacing.xs}px;
+  --flikky-space-sm: ${spacing.sm}px;
+  --flikky-space-md: ${spacing.md}px;
+  --flikky-space-lg: ${spacing.lg}px;
+  --flikky-space-xl: ${spacing.xl}px;
+  --flikky-space-xxl: ${spacing.xxl}px;
+  --flikky-space-xxxl: ${spacing.xxxl}px;
+  /* 语义别名（对齐 Spacing.kt 的 screenEdge / listGap / sectionGap） */
+  --flikky-space-screen-edge: var(--flikky-space-lg);   /* ${spacing.lg}px */
+  --flikky-space-list-gap: var(--flikky-space-sm);      /* ${spacing.sm}px  */
+  --flikky-space-section-gap: var(--flikky-space-xxl);  /* ${spacing.xxl}px */
+
+  /* ── Typography（映射到 MDUI 自带 typescale，与 App MD3 scale 逐值相等）── */
+  --flikky-font-body-small: var(--mdui-typescale-body-small-size);
+  --flikky-font-body-medium: var(--mdui-typescale-body-medium-size);
+  --flikky-font-body-large: var(--mdui-typescale-body-large-size);
+  --flikky-font-label-large: var(--mdui-typescale-label-large-size);
+  --flikky-font-title-medium: var(--mdui-typescale-title-medium-size);
+  --flikky-font-title-large: var(--mdui-typescale-title-large-size);
+
+  /* ── 气泡圆角（默认值；运行时由 app.js 从 peer-info 的 bubbleCornerRadius 覆写）──
+   * 「一个设计决策一处改动两端生效」的活样例：手机拖 slider → 浏览器实时改圆角。 */
+  --flikky-bubble-radius: ${bubbleDefault}px;
+
+  /* ── Expressive 新增 shape 档位（本地 MD3 Shape.md；App 侧尚未使用）── */
+  --flikky-shape-xl-increased: 32px;
+  --flikky-shape-xxl: 48px;
+
+  /* ── 语义表面层级 ──
+   * 本地 MD3 文档没有「哪层做页面底、哪层做浮起面板」的规则，这里显式定义：
+   * 浅色下面板比页面亮（白纸浮在染色底上），深色下反过来（越高越亮，符合 MD3 暗色逻辑）。
+   * 两种模式都保证面板与页面差一档明度 → 层级关系一致。 */
+  --flikky-page-bg: rgb(var(--mdui-color-surface-container));
+  --flikky-pillar-bg: rgb(var(--mdui-color-surface-container-lowest));
+  --flikky-raised-bg: rgb(var(--mdui-color-surface-container-high));
+  --flikky-raised-shadow: 0 1px 3px rgba(0, 0, 0, .10), 0 4px 8px rgba(0, 0, 0, .06);
+
+  /* ── 动效速度层。数值语义与 App 的 LocalMotionScale 一致：越大越慢，0 = 关闭。── */
+  --flikky-motion-scale: 1;
+
+  /* ── 完整 type scale（对齐 Type.kt，含 font-weight、line-height 与 letter-spacing）──
+   * 主变量编码为 "weight size/line-height"，配合 font 简写使用：
+   * font: var(--flikky-type-title-medium) var(--flikky-font-family);
+   * weight 必须显式写入 —— font 简写省略它时会重置为 400，titleMedium/titleSmall/
+   * label-* 在 Type.kt 里是 Medium(500)，省略就会比 App 端轻一档。 */
+${TYPE_KEYS.map((k) => {
+  const t = typeScale[k];
+  const name = toKebab(k);
+  return `  --flikky-type-${name}: ${t.weight} ${t.size}px/${t.lineHeight}px;\n  --flikky-type-${name}-tracking: ${t.tracking}px;`;
+}).join('\n')}
+}
+`;
+
+// --- Semantic surface layering per theme mode --------------------------------
+// 三个页面的 <html> 初始类是 mdui-theme-auto，只有 applyTheme() 跑过之后才变成
+// mdui-theme-dark/light。若只写 .mdui-theme-dark，peer-info 到达前的那一帧会用浅色层级
+// 在暗色系统上闪一下 —— 所以 auto 态必须自己跟随系统。
+const themeBlocks = `
+.mdui-theme-dark {
+  --flikky-page-bg: rgb(var(--mdui-color-surface-container-lowest));
+  --flikky-pillar-bg: rgb(var(--mdui-color-surface-container));
+  --flikky-raised-shadow: 0 1px 3px rgba(0, 0, 0, .5), 0 4px 8px rgba(0, 0, 0, .3);
+}
+
+@media (prefers-color-scheme: dark) {
+  .mdui-theme-auto {
+    --flikky-page-bg: rgb(var(--mdui-color-surface-container-lowest));
+    --flikky-pillar-bg: rgb(var(--mdui-color-surface-container));
+    --flikky-raised-shadow: 0 1px 3px rgba(0, 0, 0, .5), 0 4px 8px rgba(0, 0, 0, .3);
+  }
+}
+
+/* AMOLED：页面底纯黑，面板用 surface-container 抬起。
+   用 container 而不是 container-lowest —— 后者在暗色是 N4，压在纯黑上几乎看不出边界。 */
+[data-amoled="1"] {
+  --flikky-page-bg: #000;
+  --flikky-pillar-bg: rgb(var(--mdui-color-surface-container));
+  --flikky-raised-shadow: 0 1px 3px rgba(0, 0, 0, .8);
+}
+
+/* 系统级 reduce-motion 直接把速度层压到 0，与 App「animatorDurationScale==0 强制关闭」同语义 */
+@media (prefers-reduced-motion: reduce) {
+  :root { --flikky-motion-scale: 0; }
+}
+`;
+
+writeFileSync(OUT, out + themeBlocks);
+console.log(`Wrote ${OUT}`);
+console.log(`  shapes: ${SHAPE_KEYS.map((k) => `${k}=${shapes[k]}`).join(', ')}`);
+console.log(`  spacing: ${SPACE_KEYS.map((k) => `${k}=${spacing[k]}`).join(', ')}`);
+console.log(`  bubble default: ${bubbleDefault}`);

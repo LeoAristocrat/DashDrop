@@ -1,0 +1,396 @@
+package com.leoaristocrat.dashdrop.ui.home
+
+import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import com.leoaristocrat.dashdrop.R
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.leoaristocrat.dashdrop.data.SessionRepository
+import com.leoaristocrat.dashdrop.data.db.entities.GroupEntity
+import com.leoaristocrat.dashdrop.data.db.entities.SessionEntity
+import com.leoaristocrat.dashdrop.data.settings.GroupMode
+import com.leoaristocrat.dashdrop.data.settings.SettingsRepository
+import com.leoaristocrat.dashdrop.util.SortKey
+import com.leoaristocrat.dashdrop.util.SortSpec
+import com.leoaristocrat.dashdrop.util.tap
+import com.leoaristocrat.dashdrop.di.ServiceLocator
+import com.leoaristocrat.dashdrop.export.ExportMode
+import com.leoaristocrat.dashdrop.export.ExportSession
+import com.leoaristocrat.dashdrop.export.ExportSnapshot
+import com.leoaristocrat.dashdrop.network.UsableIpPolicy
+import com.leoaristocrat.dashdrop.service.TransferService
+import com.leoaristocrat.dashdrop.session.SessionState
+import com.leoaristocrat.dashdrop.ui.exporting.LocalExportWriter
+import com.leoaristocrat.dashdrop.util.IdGen
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.ZoneId
+
+class HomeViewModel @JvmOverloads constructor(
+    app: Application,
+    private val repository: SessionRepository = ServiceLocator.repository,
+    private val sessionState: SessionState = ServiceLocator.session,
+    private val pinGenerator: () -> String = { IdGen.newPin() },
+    private val now: () -> Long = { System.currentTimeMillis() },
+    private val settingsRepository: SettingsRepository = ServiceLocator.settingsRepository,
+    // lambda 而不是 NetworkInfo 实例：默认值在构造时就会求值，直接引用 ServiceLocator 会让
+    // 没初始化过它的单测在 new ViewModel 时就炸。
+    private val currentWifiIp: () -> String? = { ServiceLocator.networkInfo.currentWifiIpv4() },
+    private val localExportWriter: suspend (Uri, ExportSnapshot) -> Unit = { uri, snapshot ->
+        LocalExportWriter.write(
+            context = app,
+            uri = uri,
+            snapshot = snapshot,
+            sessionFileResolver = { sessionId, fileId ->
+                ServiceLocator.fileStore.fileDir(sessionId).resolve(fileId)
+                    .takeIf { it.exists() && it.isFile }
+            },
+            favoriteFileResolver = { fileId ->
+                ServiceLocator.favoriteFileStore.resolve(fileId)
+                    .takeIf { it.exists() && it.isFile }
+            },
+        )
+    },
+) : AndroidViewModel(app) {
+
+    val sessions: Flow<List<SessionEntity>> = repository.observeSessions()
+    val groups: Flow<List<GroupEntity>> = repository.observeGroups()
+    val activeGroupId: Flow<Long?> = settingsRepository.settings.map { it.activeGroupId }
+    val searchEnabled: Flow<Boolean> = settingsRepository.settings.map { it.historyRetainLimit != 0 }
+
+    val homeItems: Flow<List<HomeListItem>> = combine(
+        repository.observeSessions(),
+        settingsRepository.settings,
+    ) { sessions, settings ->
+        HomeListBuilder.build(
+            sessions = HomeListBuilder.filterByGroup(sessions, settings.activeGroupId),
+            // 从设置取，不写死。此前这两个实参是字面量，于是 SortKey.NAME 与
+            // GroupMode.NONE / STATUS 全是不可达代码（守卫见 HomeWiringTest）。
+            sort = settings.homeSort,
+            group = settings.groupMode,
+            today = LocalDate.now(),
+            zone = ZoneId.systemDefault(),
+        )
+    }
+
+    val homeSort: Flow<SortSpec> = settingsRepository.settings.map { it.homeSort }
+    val groupMode: Flow<GroupMode> = settingsRepository.settings.map { it.groupMode }
+
+    private val _selection = MutableStateFlow<Set<Long>?>(null)
+    val selection: StateFlow<Set<Long>?> = _selection.asStateFlow()
+
+    val selecting: StateFlow<Boolean> = _selection
+        .map { it != null }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    sealed class StartResult {
+        object Success : StartResult()
+
+        /** 没有电脑连得上的 Wi-Fi 地址，开服只会得到一个空 URL 的死页面。 */
+        object NoUsableNetwork : StartResult()
+    }
+
+    /**
+     * 开启传输服务。
+     *
+     * 先确认拿得到可用的 Wi-Fi IPv4：拿不到就直接拒绝，不启动服务、也不让 UI 跳进传输页——
+     * 否则 [com.leoaristocrat.dashdrop.service.TransferService] 会在前台通知闪一下之后自杀，
+     * 而传输页留在原地转圈等一个永远不会来的浏览器（v1.17.0 装机反馈）。
+     */
+    fun startService(): StartResult {
+        if (!UsableIpPolicy.isUsable(currentWifiIp())) {
+            return StartResult.NoUsableNetwork
+        }
+        val ctx = getApplication<Application>()
+        val intent = Intent(ctx, TransferService::class.java).apply {
+            action = TransferService.ACTION_START
+        }
+        ctx.startForegroundService(intent)
+        return StartResult.Success
+    }
+
+    /** 主页直接停止当前进行中传输（点击会话项右侧的停止按钮触发）。 */
+    fun stopService() {
+        val ctx = getApplication<Application>()
+        ctx.startService(Intent(ctx, TransferService::class.java).apply {
+            action = TransferService.ACTION_STOP
+        })
+    }
+
+    fun rename(sessionId: Long, newName: String): Job =
+        viewModelScope.launch { repository.rename(sessionId, newName) }
+
+    fun setPinned(sessionId: Long, pinned: Boolean): Job =
+        viewModelScope.launch { repository.setPinned(sessionId, pinned) }
+
+    fun deleteSession(sessionId: Long): Job =
+        viewModelScope.launch { repository.deleteSession(sessionId) }
+
+    fun setSortKey(key: SortKey): Job = viewModelScope.launch {
+        val current = settingsRepository.settings.first().homeSort
+        settingsRepository.setHomeSort(current.tap(key))
+    }
+
+    fun setGroupMode(value: GroupMode): Job =
+        viewModelScope.launch { settingsRepository.setGroupMode(value) }
+
+    fun setActiveGroup(id: Long?): Job =
+        viewModelScope.launch { settingsRepository.setActiveGroup(id) }
+
+    fun createGroup(name: String): Job =
+        viewModelScope.launch {
+            val validName = normalizeGroupName(name) ?: return@launch
+            val id = repository.createGroup(validName)
+            settingsRepository.setActiveGroup(id)
+        }
+
+    fun renameGroup(id: Long, name: String): Job =
+        viewModelScope.launch {
+            val validName = normalizeGroupName(name) ?: return@launch
+            repository.renameGroup(id, validName)
+        }
+
+    suspend fun deleteGroupWithUndo(id: Long): Pair<GroupEntity, List<Long>>? {
+        val active = settingsRepository.settings.first().activeGroupId
+        val token = repository.deleteGroup(id) ?: return null
+        if (active == id) settingsRepository.setActiveGroup(null)
+        return token
+    }
+
+    suspend fun restoreGroup(group: GroupEntity, members: List<Long>) {
+        val restoredId = repository.restoreGroup(group, members)
+        settingsRepository.setActiveGroup(restoredId)
+    }
+
+    fun reorderGroups(orderedIds: List<Long>): Job =
+        viewModelScope.launch { repository.reorderGroups(orderedIds) }
+
+    private fun normalizeGroupName(name: String): String? =
+        name.trim().take(12).ifEmpty { null }
+
+    // --- Selection mode -----------------------------------------------------
+
+    fun enterSelecting() {
+        if (_selection.value == null) _selection.value = emptySet()
+    }
+
+    fun exitSelecting() {
+        _selection.value = null
+    }
+
+    fun toggleSelection(sessionId: Long) {
+        val current = _selection.value ?: emptySet()
+        _selection.value = if (sessionId in current) current - sessionId else current + sessionId
+    }
+
+    fun selectAll(ids: List<Long>) {
+        _selection.value = ids.toSet()
+    }
+
+    fun clearSelection() {
+        _selection.value = null
+    }
+
+    /** 对当前选中的所有会话设置置顶态（pinned 由 UI 先算"是否全部已置顶"后传入），完成后退出多选。 */
+    suspend fun pinSelected(pinned: Boolean) {
+        val ids = _selection.value ?: return
+        ids.forEach { repository.setPinned(it, pinned) }
+        _selection.value = null
+    }
+
+    /** 批量删除当前选中的所有会话，完成后退出多选。 */
+    suspend fun deleteSelected() {
+        val ids = _selection.value ?: return
+        ids.forEach { repository.deleteSession(it) }
+        _selection.value = null
+    }
+
+    /** 重命名当前唯一选中的会话（UI 仅在恰好选中 1 条时调用），完成后退出多选；非单选则 no-op 且不退出。 */
+    suspend fun renameSelected(newName: String) {
+        val id = _selection.value?.singleOrNull() ?: return
+        repository.rename(id, newName)
+        _selection.value = null
+    }
+
+    /**
+     * 把当前选中的会话整体移动到 [groupId]（null = 移出分组，回到「全部」），
+     * 完成后退出多选并返回移动的数量；空选则 no-op 返回 0。
+     */
+    /** 行内菜单的单条移动：不碰多选集合，避免行内操作把用户拖进多选态。 */
+    suspend fun moveSessionToGroup(sessionId: Long, groupId: Long?) {
+        repository.moveSessionsToGroup(listOf(sessionId), groupId)
+    }
+
+    suspend fun moveSelectedToGroup(groupId: Long?): Int {
+        val ids = _selection.value?.toList().orEmpty()
+        if (ids.isEmpty()) return 0
+        repository.moveSessionsToGroup(ids, groupId)
+        _selection.value = null
+        return ids.size
+    }
+
+    // --- Export kickoff -----------------------------------------------------
+
+    sealed class ExportStartResult {
+        object Success : ExportStartResult()
+        object TransferRunning : ExportStartResult()
+        object EmptySelection : ExportStartResult()
+        object NoValidSessions : ExportStartResult()
+    }
+
+    /**
+     * Kick off a batch export.
+     *
+     * 1. Require selection to be non-null and non-empty.
+     * 2. Refuse if transfer or another export is active (both collapse into TransferRunning;
+     *    error copy "please stop the running service" works for both cases).
+     * 3. Build an [com.leoaristocrat.dashdrop.export.ExportSnapshot] via [SessionRepository.exportSnapshot];
+     *    if the repo filtered everything out (all in-progress / unknown ids), bail with NoValidSessions.
+     * 4. Arm [SessionState] with a fresh PIN so the browser can authenticate.
+     * 5. Start [TransferService] with [TransferService.ACTION_EXPORT].
+     * 6. Clear selection on success so a return-to-home after export doesn't leave the UI
+     *    stuck in selecting mode.
+     */
+    suspend fun startExport(sessionIds: List<Long>? = null): ExportStartResult {
+        val sel = sessionIds ?: _selection.value?.toList()
+        if (sel.isNullOrEmpty()) return ExportStartResult.EmptySelection
+        if (isTransferOrExportRunning()) return ExportStartResult.TransferRunning
+
+        val snapshot = repository.exportSnapshot(sel)
+        if (snapshot.sessions.isEmpty()) return ExportStartResult.NoValidSessions
+
+        val settings = settingsRepository.settings.first()
+        val exportSession = ExportSession(
+            sessionIds = snapshot.sessions.map { it.id },
+            pin = pinGenerator(),
+            createdAt = now(),
+            requirePin = settings.requirePin,
+        )
+        // 上一轮导出若停在 Done（用户回主页前没 acknowledge）会让 armExport 抛
+        // IllegalStateException——兜底先清干净，再 arm。
+        sessionState.clearExport()
+        sessionState.armExport(exportSession, snapshot)
+
+        val ctx = getApplication<Application>()
+        ctx.startForegroundService(
+            Intent(ctx, TransferService::class.java).apply {
+                action = TransferService.ACTION_EXPORT
+            },
+        )
+        // Drop out of selecting mode — the exporting screen owns the UX from here.
+        _selection.value = null
+        return ExportStartResult.Success
+    }
+
+    suspend fun saveExport(uri: Uri, sessionIds: List<Long>? = null): ExportStartResult {
+        val selectedIds = sessionIds ?: _selection.value?.toList()
+        if (selectedIds.isNullOrEmpty()) return ExportStartResult.EmptySelection
+
+        val snapshot = repository.exportSnapshot(selectedIds)
+        if (snapshot.sessions.isEmpty()) return ExportStartResult.NoValidSessions
+
+        localExportWriter(uri, snapshot)
+        _selection.value = null
+        return ExportStartResult.Success
+    }
+
+    private fun isTransferOrExportRunning(): Boolean {
+        val snap = sessionState.snapshot.value
+        if (snap.currentSessionId != null) return true
+        // Block when an active export is Armed or Sending. Done is "finished, waiting
+        // for the user to dismiss" — not a running export, so the next startExport
+        // should proceed (and clearExport() is called in startExport as a safety net).
+        return when (sessionState.exportMode.value) {
+            is ExportMode.Armed, is ExportMode.Sending -> true
+            else -> false
+        }
+    }
+
+    /** Batch delete for the post-export "delete local copies" flow. */
+    suspend fun deleteSessions(ids: List<Long>) {
+        ids.forEach { repository.deleteSession(it) }
+    }
+
+    // ── 两阶段导入（v1.16 ⑥）─────────────────────────────────────────────────
+    // 先落临时文件做只读冲突预检；有冲突时挂起等 UI 弹「跳过 / 覆盖」，用户选完
+    // 再正式导入。临时文件在 begin→resolve/cancel 之间存活，三个出口都负责清理。
+
+    sealed class ImportStart {
+        /** 无冲突（或读取失败），已直接完成导入。 */
+        data class Done(val result: SessionRepository.ImportResult) : ImportStart()
+
+        /** 有同名+同开始时间的既有会话，等 UI 询问用户后调 [resolveImport]。 */
+        data class NeedsDecision(val conflictCount: Int) : ImportStart()
+    }
+
+    private var stagedImportFile: java.io.File? = null
+
+    suspend fun beginImport(uri: Uri): ImportStart {
+        val ctx = getApplication<Application>()
+        cancelImport()
+        val tempFile = java.io.File(ctx.filesDir, "import_temp.zip")
+        val copied = runCatching {
+            ctx.contentResolver.openInputStream(uri)?.use { input ->
+                tempFile.outputStream().use { out -> input.copyTo(out) }
+            } != null
+        }.getOrDefault(false)
+        if (!copied) {
+            tempFile.delete()
+            return ImportStart.Done(
+                SessionRepository.ImportResult(
+                    emptyList(), emptyList(),
+                    listOf(
+                        SessionRepository.ImportError(
+                            "zip",
+                            ctx.getString(R.string.archive_read_failed),
+                        )
+                    ),
+                )
+            )
+        }
+        val conflicts = repository.peekImportConflicts(tempFile)
+        if (conflicts.isEmpty()) {
+            return try {
+                ImportStart.Done(repository.importSessions(tempFile))
+            } finally {
+                tempFile.delete()
+            }
+        }
+        stagedImportFile = tempFile
+        return ImportStart.NeedsDecision(conflicts.size)
+    }
+
+    /** 用户在冲突对话框选择后完成导入：skip=只导其余会话，overwrite=同键会话整包替换。 */
+    suspend fun resolveImport(overwriteExisting: Boolean): SessionRepository.ImportResult {
+        val tempFile = stagedImportFile ?: return SessionRepository.ImportResult(
+            emptyList(), emptyList(), emptyList(),
+        )
+        stagedImportFile = null
+        return try {
+            repository.importSessions(tempFile, overwriteExisting)
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    /** 用户在冲突对话框外点击/返回：整次导入作废。 */
+    fun cancelImport() {
+        stagedImportFile?.delete()
+        stagedImportFile = null
+    }
+
+    override fun onCleared() {
+        cancelImport()
+    }
+}

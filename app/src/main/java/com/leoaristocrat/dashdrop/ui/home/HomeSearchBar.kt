@@ -1,0 +1,307 @@
+package com.leoaristocrat.dashdrop.ui.home
+
+import android.app.Application
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SearchBar
+import androidx.compose.material3.SearchBarDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLocale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.leoaristocrat.dashdrop.R
+import com.leoaristocrat.dashdrop.data.SessionRepository
+import com.leoaristocrat.dashdrop.data.db.entities.SessionEntity
+import com.leoaristocrat.dashdrop.ui.components.MAX_CONTENT_WIDTH_DP
+import com.leoaristocrat.dashdrop.ui.components.ImportExportOverflowMenu
+import com.leoaristocrat.dashdrop.ui.search.SearchViewModel
+import com.leoaristocrat.dashdrop.ui.theme.Motion
+import com.leoaristocrat.dashdrop.ui.theme.Spacing
+import java.text.SimpleDateFormat
+import java.util.Date
+
+/**
+ * 主页顶部 SearchBar：折叠态取代顶栏（去标题），trailing overflow 收纳会话导入与导出。
+ * 原地展开为全屏搜索，结果分「会话」（名称匹配）+「消息」（FTS，复用 SearchViewModel）两组。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HomeSearchBar(
+    sessions: List<SessionEntity>,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onOpenSession: (Long) -> Unit,
+    onResume: () -> Unit,
+    onOpenMessageHit: (sessionId: Long, messageId: Long) -> Unit,
+    onOpenFiles: () -> Unit,
+    onImport: () -> Unit,
+    onExport: () -> Unit,
+    onOpenSort: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ctx = LocalContext.current
+    val searchVm: SearchViewModel = viewModel(
+        factory = SearchViewModel.factory(ctx.applicationContext as Application),
+    )
+    val query by searchVm.query.collectAsState()
+    // settledQuery is debounced+trimmed — both result groups derive from it so they move in lockstep.
+    val settledQuery by searchVm.debouncedQuery.collectAsState()
+    val msgHits by searchVm.results.collectAsState()
+    // expanded 受控（上提到 HomeScreen）：用于隐藏 FAB/底栏并让主页铺满全屏。
+    // Intentionally driven by settledQuery (not raw query) so session hits and message hits
+    // update simultaneously — prevents one group leading the other by ~300 ms.
+    val sessionHits = remember(sessions, settledQuery) { matchSessionsByName(sessions, settledQuery) }
+    val settled = settledQuery == query.trim()
+
+    fun collapse() {
+        onExpandedChange(false)
+        searchVm.onQueryChange("")
+    }
+
+    // 折叠态：补 16dp 屏幕边距、宽屏限宽 600dp 居中；展开成全屏时边距动画归零、解除限宽。
+    // 关键：边距用 animateDpAsState 平滑收拢，否则点击瞬间会先「闪成贴边」再播放展开动画。
+    // spec 用 effects（临界阻尼、无过冲）而非 spatial：padding 不能为负，带回弹的 spatial 弹簧
+    // 在 16dp→0dp 时会过冲到负值，使下方 .padding() 抛「Padding must be non-negative」闪退。
+    val sidePadding by animateDpAsState(
+        targetValue = if (expanded) 0.dp else Spacing.screenEdge,
+        animationSpec = Motion.effects(),
+        label = "searchBarSidePadding",
+    )
+    SearchBar(
+        modifier = modifier
+            .fillMaxWidth()
+            .wrapContentWidth(Alignment.CenterHorizontally)
+            .widthIn(max = if (expanded) Dp.Unspecified else MAX_CONTENT_WIDTH_DP.dp)
+            .fillMaxWidth()
+            // coerceAtLeast(0.dp)：兜底，确保任何动画过冲都不会让 padding 变负而崩溃。
+            .padding(horizontal = sidePadding.coerceAtLeast(0.dp)),
+        expanded = expanded,
+        onExpandedChange = onExpandedChange,
+        // 默认 surfaceContainerHigh 会比同屏 listitem/NavigationBar（surfaceContainer）深一档，
+        // 顶底两栏色不一致；统一取 surfaceContainer。收藏页 SearchBar 同规格。
+        colors = SearchBarDefaults.colors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
+        inputField = {
+            SearchBarDefaults.InputField(
+                query = query,
+                onQueryChange = searchVm::onQueryChange,
+                onSearch = { },
+                expanded = expanded,
+                onExpandedChange = onExpandedChange,
+                placeholder = { Text(stringResource(R.string.home_search_placeholder)) },
+                leadingIcon = {
+                    if (expanded) {
+                        IconButton(onClick = { collapse() }) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = stringResource(R.string.home_search_collapse),
+                            )
+                        }
+                    } else {
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = stringResource(R.string.home_search),
+                        )
+                    }
+                },
+                trailingIcon = {
+                    if (expanded) {
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { searchVm.onQueryChange("") }) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = stringResource(R.string.home_search_clear),
+                                )
+                            }
+                        }
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = onOpenFiles) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_folder_open),
+                                    contentDescription = stringResource(R.string.files_entry),
+                                )
+                            }
+                            ImportExportOverflowMenu(
+                                importLabel = stringResource(R.string.home_import_sessions),
+                                exportLabel = stringResource(R.string.home_export_sessions),
+                                onImport = onImport,
+                                onExport = onExport,
+                                sortLabel = stringResource(R.string.home_sort_sheet_title),
+                                onSort = onOpenSort,
+                            )
+                        }
+                    }
+                },
+            )
+        },
+    ) {
+        when {
+            query.isBlank() -> CenterHint(stringResource(R.string.home_search_hint))
+            sessionHits.isEmpty() && msgHits.isEmpty() ->
+                // Only show "no match" once the debounce has settled; suppress the ~300ms flash
+                // that would otherwise appear when a query has only message hits (not session-name hits).
+                if (settled) CenterHint(stringResource(R.string.home_search_empty))
+                else Box(Modifier.fillMaxSize())
+            // 全屏展开后内容会延伸到导航栏/键盘之下，给结果列表补 nav + ime inset，末项不被遮挡。
+            else -> LazyColumn(modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
+                if (sessionHits.isNotEmpty()) {
+                    item { SectionHeader(stringResource(R.string.home_search_sessions)) }
+                    items(sessionHits, key = { "s${it.id}" }) { s ->
+                        SessionHitRow(s) {
+                            collapse()
+                            if (s.endedAt == null) onResume() else onOpenSession(s.id)
+                        }
+                    }
+                }
+                if (msgHits.isNotEmpty()) {
+                    item { SectionHeader(stringResource(R.string.home_search_messages)) }
+                    items(msgHits, key = { "m${it.messageId}" }) { hit ->
+                        MessageHitRow(hit) { collapse(); onOpenMessageHit(hit.sessionId, hit.messageId) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier
+            .semantics { heading() }
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.screenEdge, vertical = Spacing.sm),
+    )
+}
+
+@Composable
+private fun CenterHint(text: String) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(Spacing.xxl),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun SessionHitRow(s: SessionEntity, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.screenEdge, vertical = Spacing.md),
+    ) {
+        Text(
+            s.name,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            if (s.endedAt == null) {
+                stringResource(R.string.home_in_progress)
+            } else {
+                s.previewText ?: listOf(
+                    pluralStringResource(R.plurals.home_message_count, s.messageCount, s.messageCount),
+                    pluralStringResource(R.plurals.home_file_count, s.fileCount, s.fileCount),
+                ).joinToString(" · ")
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun MessageHitRow(
+    hit: SessionRepository.SearchHit,
+    onClick: () -> Unit,
+) {
+    val locale = LocalLocale.current.platformLocale
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.screenEdge, vertical = Spacing.md),
+    ) {
+        Text(
+            hit.sessionName,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (hit.kind == "FILE") {
+                Icon(
+                    // 与消息文件气泡（MessageBubble 用 ic_description）统一图标风格。
+                    painterResource(R.drawable.ic_description),
+                    contentDescription = stringResource(R.string.home_file),
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.size(Spacing.xs))
+            }
+            Text(
+                hit.snippet,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            SimpleDateFormat("MM-dd HH:mm", locale).format(Date(hit.timestamp)),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}

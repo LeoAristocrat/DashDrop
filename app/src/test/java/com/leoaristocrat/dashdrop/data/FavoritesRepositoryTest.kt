@@ -1,0 +1,572 @@
+package com.leoaristocrat.dashdrop.data
+
+import android.content.Context
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import app.cash.turbine.test
+import com.leoaristocrat.dashdrop.data.db.FlikkyDatabase
+import com.leoaristocrat.dashdrop.session.Message
+import com.leoaristocrat.dashdrop.session.Origin
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
+import org.junit.After
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.io.File
+import java.io.ByteArrayOutputStream
+import java.util.zip.ZipFile
+import com.leoaristocrat.dashdrop.export.ExportScope
+import com.leoaristocrat.dashdrop.export.ExportSnapshot
+import com.leoaristocrat.dashdrop.export.ZipExporter
+import com.leoaristocrat.dashdrop.export.ZipImporter
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
+class FavoritesRepositoryTest {
+    @get:Rule val tmp = TemporaryFolder()
+    private lateinit var db: FlikkyDatabase
+    private lateinit var sessionFileStore: SessionFileStore
+    private lateinit var favoriteFileStore: FavoriteFileStore
+    private lateinit var repo: FavoritesRepository
+
+    private var clock = 1_000L
+
+    @Before fun setup() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        db = Room.inMemoryDatabaseBuilder(ctx, FlikkyDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        sessionFileStore = SessionFileStore(filesDir = tmp.root)
+        favoriteFileStore = FavoriteFileStore(filesDir = tmp.root)
+        repo = FavoritesRepository(
+            favoriteDao = db.favoriteDao(),
+            favoriteGroupDao = db.favoriteGroupDao(),
+            sessionFileStore = sessionFileStore,
+            favoriteFileStore = favoriteFileStore,
+            now = { clock },
+            depotIdFactory = { "depot-$clock" },
+            localSourceMessageIdFactory = { -clock },
+        )
+    }
+
+    @After fun tearDown() { db.close() }
+
+    @Test fun favoriteText_persists_snapshot_and_favorited_ids_are_session_scoped() = runTest {
+        clock = 10L
+        val favoriteId = repo.favoriteText(
+            sid = 1L,
+            sessionName = "chat A",
+            msg = Message.Text(id = 5L, origin = Origin.PHONE, timestamp = 7L, content = "remember this"),
+            groupId = null,
+        )
+        repo.favoriteText(
+            sid = 2L,
+            sessionName = "chat B",
+            msg = Message.Text(id = 5L, origin = Origin.BROWSER, timestamp = 8L, content = "same message id"),
+            groupId = null,
+        )
+
+        val row = db.favoriteDao().getById(favoriteId)!!
+        assertEquals("TEXT", row.kind)
+        assertEquals("remember this", row.textContent)
+        assertEquals("chat A", row.sourceSessionName)
+        assertEquals("PHONE", row.origin)
+        assertEquals(10L, row.createdAt)
+
+        repo.observeFavoritedIds(1L).test {
+            assertEquals(listOf(5L), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+        assertTrue(repo.isFavorited(1L, 5L))
+        assertTrue(repo.isFavorited(2L, 5L))
+        assertFalse(repo.isFavorited(3L, 5L))
+    }
+
+    @Test fun favoriteFile_copies_bytes_to_independent_depot_file() = runTest {
+        val source = sessionFileStore.archiveFromStream(
+            sessionId = 9L,
+            fileId = "source-file",
+            source = "payload".byteInputStream(),
+        )
+        clock = 20L
+
+        val favoriteId = repo.favoriteFile(
+            sid = 9L,
+            sessionName = "files",
+            msg = Message.File(
+                id = 99L,
+                origin = Origin.BROWSER,
+                timestamp = 1L,
+                fileId = "source-file",
+                name = "report.pdf",
+                sizeBytes = 7L,
+                mime = "application/pdf",
+                status = Message.File.Status.COMPLETED,
+            ),
+            groupId = 3L,
+        )
+
+        val row = db.favoriteDao().getById(favoriteId)!!
+        assertEquals("FILE", row.kind)
+        assertEquals("depot-20", row.fileId)
+        assertEquals("report.pdf", row.fileName)
+        assertEquals(7L, row.fileSize)
+        assertEquals("application/pdf", row.fileMime)
+        assertEquals(3L, row.groupId)
+        assertArrayEquals("payload".toByteArray(), favoriteFileStore.resolve("depot-20").readBytes())
+
+        source.writeText("changed")
+        assertArrayEquals("payload".toByteArray(), favoriteFileStore.resolve("depot-20").readBytes())
+        sessionFileStore.deleteSessionDir(9L)
+        assertTrue(favoriteFileStore.resolve("depot-20").exists())
+    }
+
+    @Test fun favoriteFile_fails_when_source_file_is_missing() = runTest {
+        val result = runCatching {
+            repo.favoriteFile(
+                sid = 1L,
+                sessionName = "missing",
+                msg = Message.File(
+                    id = 2L,
+                    origin = Origin.PHONE,
+                    timestamp = 1L,
+                    fileId = "missing-file",
+                    name = "lost.bin",
+                    sizeBytes = 1L,
+                    mime = "application/octet-stream",
+                    status = Message.File.Status.COMPLETED,
+                ),
+                groupId = null,
+            )
+        }
+
+        assertTrue(result.isFailure)
+        assertTrue(repo.observeFavorites().first().isEmpty())
+    }
+
+    @Test fun findFavoriteFile_returns_the_recorded_display_name_not_the_depot_id() = runTest {
+        sessionFileStore.archiveFromStream(
+            sessionId = 9L,
+            fileId = "source-file",
+            source = "payload".byteInputStream(),
+        )
+        clock = 20L
+        val favoriteId = repo.favoriteFile(
+            sid = 9L,
+            sessionName = "files",
+            msg = Message.File(
+                id = 99L,
+                origin = Origin.BROWSER,
+                timestamp = 1L,
+                fileId = "source-file",
+                name = "report.pdf",
+                sizeBytes = 7L,
+                mime = "application/pdf",
+                status = Message.File.Status.COMPLETED,
+            ),
+            groupId = null,
+        )
+
+        val handle = repo.findFavoriteFile(favoriteId)
+        assertEquals("report.pdf", handle?.second)
+        assertArrayEquals("payload".toByteArray(), handle?.first?.readBytes())
+    }
+
+    @Test fun findFavoriteFile_falls_back_to_the_depot_id_when_fileName_is_null() = runTest {
+        clock = 30L
+        val depotId = "depot-30"
+        favoriteFileStore.copyIn(depotId, "bytes".byteInputStream())
+        val favoriteId = db.favoriteDao().insert(
+            com.leoaristocrat.dashdrop.data.db.entities.FavoriteEntity(
+                sourceSessionId = 1L,
+                sourceMessageId = 1L,
+                kind = "FILE",
+                fileId = depotId,
+                fileName = null,
+                fileSize = 5L,
+                fileMime = "application/octet-stream",
+                groupId = null,
+                createdAt = clock,
+                sourceSessionName = null,
+                origin = Origin.PHONE.name,
+            )
+        )
+
+        val handle = repo.findFavoriteFile(favoriteId)
+        assertEquals(depotId, handle?.second)
+    }
+
+    @Test fun findFavoriteFile_returns_null_when_the_row_or_the_file_is_missing() = runTest {
+        assertNull(repo.findFavoriteFile(404L))
+    }
+
+    @Test fun findFavoriteFileDetails_preserves_the_recorded_mime_without_relying_on_extension() = runTest {
+        sessionFileStore.archiveFromStream(
+            sessionId = 9L,
+            fileId = "source-image",
+            source = "payload".byteInputStream(),
+        )
+        val favoriteId = repo.favoriteFile(
+            sid = 9L,
+            sessionName = "files",
+            msg = Message.File(
+                id = 100L,
+                origin = Origin.BROWSER,
+                timestamp = 1L,
+                fileId = "source-image",
+                name = "cover",
+                sizeBytes = 7L,
+                mime = "image/png",
+                status = Message.File.Status.COMPLETED,
+            ),
+            groupId = null,
+        )
+
+        val handle = repo.findFavoriteFileDetails(favoriteId)
+        assertEquals("cover", handle?.fileName)
+        assertEquals("image/png", handle?.mime)
+        assertArrayEquals("payload".toByteArray(), handle?.file?.readBytes())
+    }
+
+    @Test fun snapshot_reads_favorites_and_groups_without_registering_a_flow_observer() = runTest {
+        clock = 40L
+        val groupId = repo.createGroup("Common")
+        repo.favoriteText(
+            sid = 1L,
+            sessionName = "chat",
+            msg = Message.Text(id = 1L, origin = Origin.PHONE, timestamp = 1L, content = "hi"),
+            groupId = groupId,
+        )
+
+        val (favorites, groups) = repo.snapshot()
+        assertEquals(1, favorites.size)
+        assertEquals("hi", favorites[0].textContent)
+        assertEquals(1, groups.size)
+        assertEquals("Common", groups[0].name)
+    }
+
+    @Test fun addLocalText_persists_standalone_text_snapshot() = runTest {
+        clock = 60L
+
+        val favoriteId = repo.addLocalText("  local note  ", groupId = 4L)
+
+        val row = db.favoriteDao().getById(favoriteId)!!
+        assertEquals("TEXT", row.kind)
+        assertEquals("local note", row.textContent)
+        assertEquals(FavoritesRepository.LOCAL_SOURCE_SESSION_ID, row.sourceSessionId)
+        assertEquals(-60L, row.sourceMessageId)
+        assertEquals(4L, row.groupId)
+        assertEquals(60L, row.createdAt)
+        assertEquals("Locally added", row.sourceSessionName)
+        assertEquals("PHONE", row.origin)
+    }
+
+    @Test fun addLocalFile_copies_stream_to_independent_depot_file() = runTest {
+        clock = 70L
+
+        val favoriteId = repo.addLocalFile(
+            name = "local.txt",
+            sizeBytes = null,
+            mime = "text/plain",
+            groupId = null,
+            source = "payload".byteInputStream(),
+        )
+
+        val row = db.favoriteDao().getById(favoriteId)!!
+        assertEquals("FILE", row.kind)
+        assertEquals(FavoritesRepository.LOCAL_SOURCE_SESSION_ID, row.sourceSessionId)
+        assertEquals(-70L, row.sourceMessageId)
+        assertEquals("depot-70", row.fileId)
+        assertEquals("local.txt", row.fileName)
+        assertEquals(7L, row.fileSize)
+        assertEquals("text/plain", row.fileMime)
+        assertEquals("Locally added", row.sourceSessionName)
+        assertArrayEquals("payload".toByteArray(), favoriteFileStore.resolve("depot-70").readBytes())
+    }
+
+    @Test fun unfavoriteBySource_deletes_row_and_depot_file_idempotently() = runTest {
+        sessionFileStore.archiveFromStream(1L, "source-file", "payload".byteInputStream())
+        clock = 30L
+        repo.favoriteFile(
+            sid = 1L,
+            sessionName = "files",
+            msg = Message.File(
+                id = 3L,
+                origin = Origin.PHONE,
+                timestamp = 1L,
+                fileId = "source-file",
+                name = "a.bin",
+                sizeBytes = 7L,
+                mime = "application/octet-stream",
+                status = Message.File.Status.COMPLETED,
+            ),
+            groupId = null,
+        )
+
+        assertTrue(favoriteFileStore.resolve("depot-30").exists())
+
+        repo.unfavoriteBySource(1L, 3L)
+        repo.unfavoriteBySource(1L, 3L)
+
+        assertFalse(repo.isFavorited(1L, 3L))
+        assertTrue(!favoriteFileStore.resolve("depot-30").exists())
+    }
+
+    @Test fun deleteGroup_rehomes_favorites_and_restore_rebinds_members() = runTest {
+        val groupId = repo.createGroup(" Ammo ")
+        val first = repo.favoriteText(1L, "chat", Message.Text(1L, Origin.PHONE, 1L, "one"), groupId)
+        val second = repo.favoriteText(1L, "chat", Message.Text(2L, Origin.PHONE, 2L, "two"), groupId)
+
+        val deleted = repo.deleteGroup(groupId)!!
+
+        assertEquals("Ammo", deleted.first.name)
+        assertEquals(listOf(first, second), deleted.second)
+        assertNull(db.favoriteGroupDao().getById(groupId))
+        assertNull(db.favoriteDao().getById(first)!!.groupId)
+        assertNull(db.favoriteDao().getById(second)!!.groupId)
+
+        val restored = repo.restoreGroup(deleted.first, deleted.second)
+
+        assertNotEquals(groupId, restored)
+        assertEquals(restored, db.favoriteDao().getById(first)!!.groupId)
+        assertEquals(restored, db.favoriteDao().getById(second)!!.groupId)
+    }
+
+    @Test fun deleteFavorite_deleteFavorites_move_reorder_and_search() = runTest {
+        val work = repo.createGroup("Work")
+        val personal = repo.createGroup("Personal")
+        val text = repo.favoriteText(1L, "chat", Message.Text(1L, Origin.PHONE, 1L, "Alpha Note"), null)
+        sessionFileStore.archiveFromStream(1L, "source-file", "payload".byteInputStream())
+        clock = 40L
+        val file = repo.favoriteFile(
+            sid = 1L,
+            sessionName = "chat",
+            msg = Message.File(
+                id = 2L,
+                origin = Origin.PHONE,
+                timestamp = 2L,
+                fileId = "source-file",
+                name = "Beta.pdf",
+                sizeBytes = 7L,
+                mime = "application/pdf",
+                status = Message.File.Status.COMPLETED,
+            ),
+            groupId = work,
+        )
+
+        repo.moveFavoritesToGroup(listOf(text, file), personal)
+        assertEquals(listOf(text, file), db.favoriteDao().memberIds(personal))
+
+        repo.reorderGroups(listOf(personal, work))
+        assertEquals(listOf(personal, work), repo.observeGroups().first().map { it.id })
+
+        assertEquals(listOf(text), repo.search(repo.observeFavorites().first(), "alpha").map { it.id })
+        assertEquals(listOf(file), repo.search(repo.observeFavorites().first(), "BETA").map { it.id })
+        assertEquals(repo.observeFavorites().first().map { it.id }, repo.search(repo.observeFavorites().first(), "").map { it.id })
+
+        val thumbnail = favoriteFileStore.thumbnailFile(file).apply { writeBytes(byteArrayOf(9)) }
+        repo.deleteFavorite(file)
+        assertTrue(!favoriteFileStore.resolve("depot-40").exists())
+        assertTrue(!thumbnail.exists())
+
+        repo.deleteFavorites(listOf(text))
+        assertTrue(repo.observeFavorites().first().isEmpty())
+    }
+
+    @Test fun deleteSourceSession_does_not_touch_favorite_snapshot_or_depot_file() = runTest {
+        val sessionRepo = SessionRepository(
+            sessionDao = db.sessionDao(),
+            messageDao = db.messageDao(),
+            groupDao = db.groupDao(),
+            fileStore = sessionFileStore,
+            now = { clock },
+        )
+        val sid = sessionRepo.beginSession("source", startedAt = 1L)
+        sessionRepo.appendMessage(sid, Message.File(
+            id = 10L,
+            origin = Origin.PHONE,
+            timestamp = 2L,
+            fileId = "source-file",
+            name = "keep.bin",
+            sizeBytes = 7L,
+            mime = "application/octet-stream",
+            status = Message.File.Status.COMPLETED,
+        ))
+        sessionFileStore.archiveFromStream(sid, "source-file", "payload".byteInputStream())
+        clock = 50L
+        repo.favoriteFile(
+            sid = sid,
+            sessionName = "source",
+            msg = Message.File(
+                id = 10L,
+                origin = Origin.PHONE,
+                timestamp = 2L,
+                fileId = "source-file",
+                name = "keep.bin",
+                sizeBytes = 7L,
+                mime = "application/octet-stream",
+                status = Message.File.Status.COMPLETED,
+            ),
+            groupId = null,
+        )
+
+        sessionRepo.deleteSession(sid)
+
+        assertEquals(1, repo.observeFavorites().first().size)
+        assertTrue(favoriteFileStore.resolve("depot-50").exists())
+        assertArrayEquals("payload".toByteArray(), favoriteFileStore.resolve("depot-50").readBytes())
+    }
+
+    @Test fun exportSnapshot_preserves_groups_favorites_and_file_metadata() = runTest {
+        val groupId = repo.createGroup("Work")
+        repo.addLocalText("note", groupId)
+        clock = 80L
+        repo.addLocalFile(
+            name = "report.txt",
+            sizeBytes = null,
+            mime = "text/plain",
+            groupId = groupId,
+            source = "payload".byteInputStream(),
+        )
+
+        val exported = repo.exportSnapshot()
+
+        assertEquals(listOf("Work"), exported.groups.map { it.name })
+        assertEquals(2, exported.favorites.size)
+        val file = exported.favorites.single { it.kind == "FILE" }
+        assertEquals("depot-80", file.fileId)
+        assertEquals("report.txt", file.fileName)
+        assertEquals("text/plain", file.fileMime)
+    }
+
+    @Test fun importBackup_restores_groups_files_and_remaps_source_session() = runTest {
+        val groupId = repo.createGroup("Work")
+        clock = 90L
+        repo.addLocalFile(
+            name = "report.txt",
+            sizeBytes = null,
+            mime = "text/plain",
+            groupId = groupId,
+            source = "payload".byteInputStream(),
+        )
+        val exported = repo.exportSnapshot()
+        val snapshot = ExportSnapshot(
+            exportedAt = 100L,
+            scope = ExportScope.FAVORITES,
+            favoriteGroups = exported.groups,
+            favorites = exported.favorites.map {
+                it.copy(sourceSessionId = 44L, sourceMessageId = 55L)
+            },
+        )
+        val zipPath = tmp.newFile("favorites-backup.zip")
+        zipPath.writeBytes(ByteArrayOutputStream().also { out ->
+            ZipExporter.write(
+                out = out,
+                snapshot = snapshot,
+                fileResolver = { _, _ -> null },
+                favoriteFileResolver = { favoriteFileStore.resolve(it) },
+            )
+        }.toByteArray())
+
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val targetDb = Room.inMemoryDatabaseBuilder(ctx, FlikkyDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val targetStore = FavoriteFileStore(tmp.newFolder("target-files"))
+        val targetRepo = FavoritesRepository(
+            favoriteDao = targetDb.favoriteDao(),
+            favoriteGroupDao = targetDb.favoriteGroupDao(),
+            sessionFileStore = SessionFileStore(tmp.newFolder("target-sessions")),
+            favoriteFileStore = targetStore,
+            now = { 200L },
+            depotIdFactory = { "restored-file" },
+        )
+        try {
+            ZipFile(zipPath).use { zip ->
+                val parsed = ZipImporter.parseBackup(zip)
+                val result = targetRepo.importBackup(
+                    backup = parsed,
+                    zipFile = zip,
+                    sessionIdMap = mapOf(44L to 444L),
+                )
+                assertEquals(1, result.imported)
+                assertEquals(0, result.skipped)
+                assertTrue(result.errors.isEmpty())
+            }
+
+            val restored = targetRepo.observeFavorites().first().single()
+            assertEquals(444L, restored.sourceSessionId)
+            assertEquals("Work", targetRepo.observeGroups().first().single().name)
+            assertArrayEquals("payload".toByteArray(), targetStore.resolve("restored-file").readBytes())
+        } finally {
+            targetDb.close()
+        }
+    }
+
+    // ── D78：浏览器把会话消息收藏到手机。只能加、不能删；同一条只收一次。
+
+    @Test fun favoriteFromPeer_adds_once_and_reports_repeats() = runTest {
+        val msg = Message.Text(id = 5L, origin = Origin.PHONE, timestamp = 7L, content = "keep")
+
+        assertEquals(PeerFavoriteResult.Added, repo.favoriteFromPeer(sid = 1L, sessionName = "live", msg = msg))
+        assertEquals(PeerFavoriteResult.AlreadyFavorited, repo.favoriteFromPeer(sid = 1L, sessionName = "live", msg = msg))
+
+        val rows = repo.snapshot().first
+        assertEquals(1, rows.size)
+        assertNull("peer favorites land in Ungrouped", rows.single().groupId)
+        assertEquals("keep", rows.single().textContent)
+    }
+
+    @Test fun favoriteFromPeer_concurrent_requests_store_one_row() = runTest {
+        // 双击或两个标签页同时点：先查后插若不加锁，两次都会查到「没有」。
+        val msg = Message.Text(id = 6L, origin = Origin.BROWSER, timestamp = 7L, content = "twice")
+
+        val results = listOf(
+            async { repo.favoriteFromPeer(sid = 1L, sessionName = "live", msg = msg) },
+            async { repo.favoriteFromPeer(sid = 1L, sessionName = "live", msg = msg) },
+        ).awaitAll()
+
+        assertEquals(1, repo.snapshot().first.size)
+        assertEquals(setOf(PeerFavoriteResult.Added, PeerFavoriteResult.AlreadyFavorited), results.toSet())
+    }
+
+    @Test fun favoriteFromPeer_copies_a_file_into_the_depot() = runTest {
+        sessionFileStore.archiveFromStream(sessionId = 9L, fileId = "peer-file", source = "bytes".byteInputStream())
+        val msg = Message.File(
+            id = 90L,
+            origin = Origin.PHONE,
+            timestamp = 1L,
+            fileId = "peer-file",
+            name = "a.txt",
+            sizeBytes = 5L,
+            mime = "text/plain",
+            status = Message.File.Status.COMPLETED,
+        )
+
+        assertEquals(PeerFavoriteResult.Added, repo.favoriteFromPeer(sid = 9L, sessionName = "live", msg = msg))
+
+        val row = repo.snapshot().first.single()
+        assertEquals("a.txt", row.fileName)
+        assertEquals("bytes", favoriteFileStore.resolve(row.fileId!!).readText())
+    }
+
+    @Test fun favoritedIds_is_a_session_scoped_snapshot() = runTest {
+        repo.favoriteText(1L, "a", Message.Text(id = 5L, origin = Origin.PHONE, timestamp = 1L, content = "x"), null)
+        repo.favoriteText(2L, "b", Message.Text(id = 6L, origin = Origin.PHONE, timestamp = 1L, content = "y"), null)
+
+        assertEquals(listOf(5L), repo.favoritedIds(1L))
+    }
+}

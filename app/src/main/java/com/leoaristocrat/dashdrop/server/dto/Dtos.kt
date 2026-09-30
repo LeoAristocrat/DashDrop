@@ -1,0 +1,235 @@
+package com.leoaristocrat.dashdrop.server.dto
+
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class AuthRequest(val pin: String)
+
+@Serializable
+data class AuthResponse(
+    val ok: Boolean,
+    val error: String? = null,
+    val retryAfterSec: Int? = null,
+    /** Where the browser should navigate after a successful login. v1.2 differs by mode. */
+    val redirectTo: String? = null,
+)
+
+@Serializable
+data class SendTextRequest(val text: String)
+
+@Serializable
+data class TextMessageDto(
+    val id: Long,
+    val origin: String,
+    val timestamp: Long,
+    val content: String,
+    /**
+     * Echo of the X-Client-Id header from the upload request, so the same
+     * browser session can skip its own broadcast in onWsEvent (avoids double
+     * bubble). Null for historical messages and phone-originated events.
+     */
+    val senderId: String? = null,
+)
+
+@Serializable
+data class FileMessageDto(
+    val id: Long,
+    val origin: String,
+    val timestamp: Long,
+    val fileId: String,
+    val name: String,
+    val sizeBytes: Long,
+    val mime: String,
+    val status: String,
+    /** See [TextMessageDto.senderId]. */
+    val senderId: String? = null,
+)
+
+@Serializable
+data class MessagesResponse(
+    val texts: List<TextMessageDto>,
+    val files: List<FileMessageDto>,
+    /**
+     * Unified, timestamp-sorted view of all messages so the client can render
+     * them in the right order without inferring kind interleaving from two
+     * separate lists. Each entry has either `content` (text) or `fileId`+`name`
+     * (file); discriminated by which fields are present.
+     */
+    val ordered: List<MessageDto> = emptyList(),
+    /** D78：本会话里手机已收藏的消息 id；只在允许对端收藏时给出，否则为空。 */
+    val favoritedIds: List<Long> = emptyList(),
+)
+
+/** D78：`favorites_state` 推送 —— 本会话已收藏消息的完整集合（整体替换，不是增量）。 */
+@Serializable
+data class FavoritesStateDto(val messageIds: List<Long>)
+
+@Serializable
+data class MessageDto(
+    val kind: String,   // "text" or "file"
+    val id: Long,
+    val origin: String,
+    val timestamp: Long,
+    val content: String? = null,
+    val fileId: String? = null,
+    val name: String? = null,
+    val sizeBytes: Long? = null,
+    val mime: String? = null,
+    val status: String? = null,
+)
+
+@Serializable
+data class WsEvent(
+    val type: String,
+    val payload: kotlinx.serialization.json.JsonElement,
+)
+
+/**
+ * v1.3 D26 修订：DELETE /api/messages/{id} 的成功响应。撤回 = 真删，不再有
+ * recalledAt 时间戳；客户端拿到 (sessionId, messageId) 即可移除节点。
+ */
+@Serializable
+data class RecallResponse(
+    val messageId: Long,
+    val sessionId: Long,
+)
+
+/**
+ * Server 包内部的撤回结果枚举。data/SessionRepository.RecallOutcome 在调用
+ * 边界（KtorServer 注入 lambda 处）转成本枚举，避免 server 反向依赖 data。
+ *
+ * 真删后没有 AlreadyRecalled 分支——重复请求的消息行已不存在，等价 NotFound。
+ * 上层把 NotFound 当 idempotent 成功处理（节点已经被移除了）。
+ */
+/** D78：浏览器收藏一条会话消息的结果（server-local，不依赖 data 层）。 */
+sealed class ServerFavoriteOutcome {
+    data object Added : ServerFavoriteOutcome()
+    data object AlreadyFavorited : ServerFavoriteOutcome()
+    data object Failed : ServerFavoriteOutcome()
+}
+
+sealed class ServerRecallOutcome {
+    data class Success(val messageId: Long, val sessionId: Long) : ServerRecallOutcome()
+    object NotFound : ServerRecallOutcome()
+    object Denied : ServerRecallOutcome()
+}
+
+@Serializable
+data class FileProgressDto(
+    val messageId: Long,
+    val bytesTransferred: Long,
+    val totalBytes: Long,
+)
+
+@Serializable
+data class FileReadyDto(
+    val messageId: Long,
+    val fileId: String,
+    val name: String,
+    val sizeBytes: Long,
+)
+
+@Serializable
+data class FileRemovedDto(
+    val messageId: Long,
+)
+
+@Serializable
+data class StatusDto(
+    val startedAt: Long,
+    val uptime: Long,
+    val fileCount: Int,
+    val totalBytes: Long,
+    val bytesPerSecond: Long,
+    val clientConnected: Boolean,
+)
+
+/**
+ * M9: GET /api/peer-info response. Phone's appearance settings sent to the browser.
+ *
+ * v1.7（Phase 3 双端对齐）新增 [themeSeed]/[themeDark]：浏览器据此调 `mdui.setColorScheme` +
+ * `mdui.setTheme`，跟随手机当前主题色相与深浅。[themeSeed] 为 null 时浏览器清回 mdui 默认配色。
+ */
+@Serializable
+data class LeadingVisualDto(
+    val shape: String = "cookie9Sided",
+    val colorMode: String = "THEME",
+    /** Type id to [container, onContainer], encoded as #RRGGBB. */
+    val colors: Map<String, List<String>> = emptyMap(),
+)
+
+@Serializable
+data class PeerInfoDto(
+    val deviceName: String,
+    val phoneAvatarId: Int,
+    val phoneAvatarKey: String = "icon:smartphone",
+    val backgroundMode: String,
+    val backgroundValue: String? = null,
+    val themeSeed: String? = null,
+    val themeDark: Boolean = false,
+    /**
+     * v1.19.0: AMOLED 纯黑变体。仅在 themeDark 为 true 时有意义——浏览器端读法是
+     * `if (!themeDark) light else if (amoled) amoled else dark`。
+     * 单独一个布尔而不是把 themeDark 改成三态字符串：后者会打破既有契约与测试。
+     */
+    val amoled: Boolean = false,
+    // 气泡圆角（dp，8..28）——推给浏览器让两端气泡圆角一致；手机设置里拖 slider 即两端同步。
+    // 默认 10 与 data.settings.BUBBLE_CORNER_DEFAULT 对齐；DTO 不依赖 data 层，故此处内联。
+    val bubbleCornerRadius: Int = 10,
+    val avatarGrouping: String = "EACH",
+    // 消息操作样式（FLOATING/INLINE）——Web 端据此切换 hover 浮条 vs 常驻按钮行（§12）。
+    val messageActionStyle: String = "INLINE",
+    val animationSpeed: String = "STANDARD",
+    val sessionTimestampEnabled: Boolean = false,
+    // 手机端 App 版本号。浏览器端是这个 App 的客户端，「关于」面板要回答的正是
+    // 「我连的是哪个版本」，而 peer-info 之外没有任何端点携带它。默认空串是为了
+    // 让现有的 DTO 构造点（主要是测试夹具）不受影响。
+    val appVersion: String = "",
+    val recallEnabled: Boolean,
+    val allowPeerRecall: Boolean = true,
+    /** v1.19.0 fix wave: 收藏 tab 的 beta 开关状态；浏览器据此决定是否渲染收藏入口。 */
+    val favoriteEnabled: Boolean = false,
+    /** D78：浏览器能否把会话消息收藏到手机（收藏功能与对端开关两轴都开）。 */
+    val allowPeerFavorite: Boolean = false,
+    /**
+     * v1.20.0: 是否允许浏览器浏览手机共享存储。浏览器据此决定渲不渲染「文件」目的地。
+     * 默认 false 与 FlikkySettings 一致；DTO 不依赖 data 层，故此处内联默认值。
+     */
+    val storageBrowsingEnabled: Boolean = false,
+    /** Whether the authenticated browser may render and browse the phone album. */
+    val albumBrowsingEnabled: Boolean = false,
+
+    /**
+     * v1.20.0: 浏览存储时是否显示 `.` 开头的隐藏项。
+     *
+     * 浏览器需要知道它**变了**——目录缓存里那些列表是按旧值列出来的，
+     * 不失效的话开关翻了也看不出变化。默认 false 与 FlikkySettings 一致。
+     */
+    val showHiddenFiles: Boolean = false,
+    val leadingVisual: LeadingVisualDto = LeadingVisualDto(),
+    /** Current effective App locale, including system-language fallback. */
+    val languageTag: String = "en",
+)
+
+@Serializable
+data class WebThemeDto(
+    val themeSeed: String? = null,
+    val themeDark: Boolean = false,
+    val amoled: Boolean = false,
+    val languageTag: String = "en",
+)
+
+/**
+ * M9: client_hello WS frame from browser, carrying the browser's chosen avatar ID.
+ */
+@Serializable
+data class ClientHelloDto(
+    val type: String,
+    val avatarId: Int = 0,
+    val avatarKey: String? = null,
+)
+
+@Serializable
+data class PeerAvatarChangedDto(
+    val avatarKey: String,
+)
