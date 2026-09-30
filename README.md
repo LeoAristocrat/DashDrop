@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./docs/dashdrop_logo_slow.svg" width="150" alt="DashDrop Logo">
+  <img src="./docs/dashdrop_logo.png" width="160" alt="DashDrop Logo">
 </p>
 
 <h1 align="center">DashDrop</h1>
